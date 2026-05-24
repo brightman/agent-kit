@@ -194,8 +194,10 @@ EventKind = Literal[
 | `final_text` | `{text: str}` | LLM 返回不含 tool_calls,或跑满 max_rounds 后 LLM 给出收尾文本 |
 | `error` | `{exc_type, message, traceback, stage}` | 任意异常,run 终止前 emit 一次 |
 | `cancelled` | `{round: int, reason: str?}` | cancel event 触发,run 终止前 emit 一次 |
+| `context_compacted` | `{before_count, after_count, before_tokens, after_tokens, strategy: str}` | compactor 触发后、provider.chat 调用前 |
 
-`stage` ∈ `{"loop", "provider", "tool", "setup"}` —— 异常发生在哪个阶段。
+`stage` ∈ `{"loop", "provider", "tool", "setup", "compactor"}` —— 异常发生在哪个阶段。
+`strategy` 由 compactor 实现自填,推荐值:`"truncate"` / `"summarize"` / `"sliding_window"` / `"<custom>"`。
 
 ### 3.6 Event
 
@@ -676,6 +678,60 @@ else:
 
 **stream 模式下 `llm_response` 仍 emit** —— 下游持久化逻辑不分叉。
 
+### 8.6 Context compaction(防 context window 爆炸)
+
+**问题**:多轮 loop 累积 messages,大 tool 输出(file read / web fetch /
+mcp payload)很快可以打爆 context window。baizhi-agent / fam-runtime 都没
+解决,靠小 `max_rounds`(8-10) + 小 `max_tokens`(1024-1200)兜底 —— 一
+旦遇上大 tool 输出仍会爆。
+
+**设计**(详细见 [§ 11.b 和 § 11.c](#11b-token-估算tokenspy)):
+
+```python
+class AgentLoop:
+    def __init__(
+        self,
+        provider, toolsets, *,
+        default_max_rounds=10,
+        system_prelude="",
+        compactor: ContextCompactor | None = None,   # 默认 None == 不 compact
+    ): ...
+```
+
+每轮 provider.chat 调用前:
+
+```python
+if self._compactor and await self._compactor.should_compact(messages, last_usage):
+    new_messages = await self._compactor.compact(messages)
+    _assert_tool_pairs_intact(new_messages)         # SDK 兜底,失败 raise
+    yield Event(kind="context_compacted", payload={
+        "before_count": len(messages),
+        "after_count": len(new_messages),
+        "before_tokens": estimate_messages_tokens(messages),
+        "after_tokens": estimate_messages_tokens(new_messages),
+        "strategy": getattr(self._compactor, "name", "<unknown>"),
+    })
+    messages = new_messages
+yield Event(kind="llm_request", payload={...})
+response = await self._provider.chat(messages, tools_this_round, ...)
+last_usage = response.usage           # ← 留给下一轮 should_compact 用
+```
+
+**职责划分**:
+- SDK:Protocol 定义 + 一个内置 `TruncatingCompactor`(microcompact 无 LLM 成本) + `safe_split_messages` + `_assert_tool_pairs_intact` 兜底
+- 使用方:若想用 LLM 摘要 / RAG 拉回 / 滑动窗口 等高级策略 → 实现 ContextCompactor Protocol,自带 LLM 调用 / 模型选择 / prompt 设计
+
+**强约束**:
+- compactor 返回的 messages **MUST** 通过 `_assert_tool_pairs_intact`,
+  否则 loop raise(`stage="compactor"` 的 error event)
+- compactor SHOULD 用 `safe_split_messages` helper 决定切点
+- compactor SHOULD 在 `should_compact` 内**优先用** `last_usage["prompt_tokens"]`
+  (API 返回的精确值),fallback 才用 `estimate_messages_tokens`
+
+**关于 Q-CTX-2(compactor=None 行为)**:静默放行。爆 context window 是
+使用方的选择(可能是 demo / 调试 / 知道场景短)。SDK 不强加保护性 warn,
+保持 "minimal" 边界。
+
 ---
 
 ## 9. Runner 门面(runner.py)
@@ -812,6 +868,97 @@ a skill's full instructions before invoking it.
 
 ---
 
+## 11.b Token 估算(tokens.py)
+
+```python
+TOKEN_ESTIMATION_PADDING = 4 / 3        # 与 OpenHarness 一致
+
+def estimate_text_tokens(text: str) -> int: ...
+def estimate_messages_tokens(messages: list[Message]) -> int: ...
+```
+
+**公式**:`(len(text) + 3) // 4`,再乘 `TOKEN_ESTIMATION_PADDING` 作保守估
+计。这是 OpenHarness `services/token_estimation.py:6-10` + `compact/__init__.py:75`
+验证过的实用近似。Stage 1 不引 tiktoken。
+
+**优先级**:
+- **API 返回的** `LlmResponse.usage["prompt_tokens"]` 永远优先 ——
+  loop 把 `last_usage` 传给 `compactor.should_compact`
+- 没有 API 返回 → fallback 用 `estimate_messages_tokens`
+
+参考依据:
+- OpenHarness `services/token_estimation.py:6-10`(chars/4)
+- OpenHarness `services/compact/__init__.py:75`(4/3 padding)
+- ADK `apps/compaction.py:156-173`(prefer `prompt_token_count`)
+
+---
+
+## 11.c Safe split(context.py)
+
+```python
+def safe_split_messages(messages: list[Message], split_at: int) -> int:
+    """返回 ≤ split_at 的安全 index,保证 tool_call 与 tool_result
+    一定同存或同删。"""
+
+def _assert_tool_pairs_intact(messages: list[Message]) -> None:
+    """SDK 兜底校验:tool_call_id 配对完整。失败 raise ValueError。"""
+```
+
+**规则**(参考 ADK `apps/compaction.py:388-421`):
+
+- 若 `messages[split_at].role == "tool"`,回退 split_at 到包含其对应
+  `assistant.tool_calls` 的那个 message 之前
+- 若 `messages[split_at-1].role == "assistant"` 且 `tool_calls` 非空,
+  继续往前找,直到所有"前置 assistant tool_calls + 后续 tool messages"
+  都在右侧
+- 若回退到 0 还不能满足,raise(切不出安全点 == 不能 compact)
+
+**为什么必须**:
+LLM API 接收 messages 时,任何 `role="tool"` 的 message 必须紧接(或不远)
+在它对应的 `assistant.tool_calls` 之后。**孤立的 tool message** 或
+**没有 tool_call 配对的 assistant.tool_calls** 都会让下次 API 调用 400。
+
+这是 4 家中 ADK 唯一显式处理的非显然 bug —— 任何 compactor 自己若忘了
+处理,SDK 兜底失败会 raise,**比让用户在生产打 400 强**。
+
+### ContextCompactor Protocol(context.py)
+
+```python
+class ContextCompactor(Protocol):
+    async def should_compact(self, messages, last_usage) -> bool: ...
+    async def compact(self, messages) -> list[Message]: ...
+```
+
+**实现合同**:
+1. `messages[0].role == "system"` 时,返回值的 messages[0] **MUST** 保持
+2. 最近 N 条 verbatim(N 由实现自定,推荐 ≥ 3)
+3. tool_call / tool_result 配对 **MUST** 保持(SDK 兜底校验)
+
+### 内置 TruncatingCompactor
+
+```python
+@dataclass
+class TruncatingCompactor:
+    token_budget: int = 100_000
+    keep_recent_tool_results: int = 5
+    placeholder: str = "[tool output omitted — older than retention window]"
+```
+
+**做法**:扫所有 `role="tool"` 的 message,从老到新,距末尾超过
+`keep_recent_tool_results` 的,把 `content` 替换为 `placeholder`。
+**不删 message**,只替 content —— 这样 `tool_call_id` 配对天然保持。
+
+**适用**:tool 输出是 token bloat 主因的场景(file read / web fetch /
+mcp 大 payload)。零 LLM 成本,覆盖 80% 场景。
+
+**不适用**:user / assistant 文本本身就很长的场景(长文档喂进来) ——
+那种需要 LLM 摘要,使用方自己实现 ContextCompactor。
+
+参考依据:
+- OpenHarness `services/compact/__init__.py:808-856` `microcompact_messages`
+
+---
+
 ## 12. 测试策略
 
 ### 12.1 单元测试(每模块)
@@ -821,7 +968,14 @@ a skill's full instructions before invoking it.
 - `tests/test_toolset.py` —— ToolsetRouter 冲突检测、execute 路由、aclose 顺序
 - `tests/test_skill.py` —— parse_frontmatter 各种边界、parse_skill_ref 解析
 - `tests/test_mcp.py` —— McpServerConfig 校验、${VAR} 替换、命名规则
-- `tests/test_loop.py` —— FakeProvider 脚本化 response,验证 event 顺序、终止条件、cancel
+- `tests/test_tokens.py` —— estimate_text_tokens / estimate_messages_tokens
+  公式 + 边界(空 string、纯 tool_calls assistant、多 tool_result)
+- `tests/test_context.py` —— safe_split_messages 全部 ADK 边界、
+  _assert_tool_pairs_intact 校验、TruncatingCompactor 行为
+  (token_budget 触发 / keep_recent 保留 / placeholder 替换不影响配对)
+- `tests/test_loop.py` —— FakeProvider 脚本化 response,验证 event 顺序、
+  终止条件、cancel、**compactor 集成**(`context_compacted` event 顺序、
+  兜底校验失败时 emit error event with `stage="compactor"`)
 - `tests/test_runner.py` —— run vs run_to_completion 行为差异、资源清理
 
 ### 12.2 集成测试
@@ -859,8 +1013,8 @@ a skill's full instructions before invoking it.
 | Stage | 内容 | 退出标准 |
 |---|---|---|
 | **0** | 仓库骨架 + 设计文档 ✓ | 模块 stub 可 import ✓ |
-| **1** | types / provider / toolset / skill 实现 + 单元测试 | 30+ 单测全绿 |
-| **2** | loop 实现(非 stream + cancel + max_rounds) + 集成测试 | FakeProvider 跑通 flashidea |
+| **1** | types / provider / toolset / skill / **tokens / context(含 TruncatingCompactor + safe_split)** 实现 + 单元测试 | 35+ 单测全绿,context 模块单测覆盖 ADK safe_split 全部边界 |
+| **2** | loop 实现(非 stream + cancel + max_rounds + **compactor 集成 + 兜底校验**) + 集成测试 | FakeProvider 跑通 flashidea;TruncatingCompactor 触发后 `context_compacted` event emit |
 | **3** | runner 实现(run + run_to_completion + 资源生命周期) + 端到端测试 | RunResult 行为符合契约 |
 | **4** | mcp 实现(lazy connect + aclose,wrap `mcp` SDK) + 真打测试 | 真打 DashScope WebSearch OK,4 种使用方 lifecycle 用例(per-call / per-run / per-tenant / global)各跑一次 |
 | **5** | stream 实现(Q1 决议) + provider.chat_stream 接 LiteLLM 等 | stream/non-stream 切换不破坏 |
@@ -906,6 +1060,9 @@ Stage 重做;baizhi-agent / fam-runtime 在 Stage 6/7 之前完全不受影响�
 | 直接 wrap Anthropic `mcp` SDK | baizhi-agent PR f6 教训 |
 | **MCP lifecycle 不枚举,实例生命周期 = session 生命周期** | ADK(2026-05-24 修订;原 4 档枚举见 proposal.md errata) |
 | 每 skill 独立 storage | baizhi-agent / fam-runtime |
+| **Context compaction:ContextCompactor Protocol + microcompact 默认实现** | OpenHarness `microcompact_messages` |
+| **Safe split 兜底(保护 tool_call/tool_result 配对)** | ADK `_safe_token_compaction_split_index` |
+| **Token 估算:chars/4 × 4/3,优先 API usage** | OpenHarness `token_estimation` + ADK `_latest_prompt_token_count` |
 | ToolCallContext 统一合同 | ADK Tool.run_async + baizhi-agent toolsets.py |
 | 命名冲突启动期检测 | baizhi-agent LlmAgentRunner |
 | 不引 google.genai / langchain | GOALS.md Non-goals |

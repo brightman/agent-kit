@@ -6,16 +6,19 @@
 - 最后一轮屏蔽 tools 强制收尾(baizhi-agent 发明,值得保留)
 - 终止条件简单:`response.tool_calls is None` 就退出。不引入 ADK 的 is_final_response 业务判断
 - 取消用 asyncio.Event,在 round 边界 check
+- Context compaction 在每次 provider.chat 前调用(若 compactor 注入),
+  loop 兜底 _assert_tool_pairs_intact;详见 docs/tech-design.md § 8.6
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import AsyncIterator
+from dataclasses import dataclass, field
+from typing import Any, AsyncIterator
 
+from .context import ContextCompactor
 from .provider import LlmProvider
 from .toolset import BaseToolset, ToolCallContext, ToolsetRouter
-from .types import Event, Message
+from .types import Event
 
 
 @dataclass
@@ -25,10 +28,12 @@ class RunRequest:
     tenant_id: str
     agent_id: str
     user_message: str
-    enabled_skills: list[str]
+    enabled_skills: list[str] = field(default_factory=list)
     max_rounds: int = 10
     temperature: float = 0.7
     system_prelude: str = ""
+    stream: bool = False                       # Q1 决议:opt-in stream
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 class AgentLoop:
@@ -41,11 +46,13 @@ class AgentLoop:
         *,
         default_max_rounds: int = 10,
         system_prelude: str = "",
+        compactor: ContextCompactor | None = None,    # None == 不 compact
     ) -> None:
         self._provider = provider
         self._router = ToolsetRouter(toolsets)
         self._default_max_rounds = default_max_rounds
         self._prelude = system_prelude
+        self._compactor = compactor
 
     async def run(
         self,
@@ -53,7 +60,7 @@ class AgentLoop:
         ctx: ToolCallContext,
     ) -> AsyncIterator[Event]:
         """执行多轮 loop,yield 事件。"""
-        # stub —— 真实现见首次接进 baizhi-agent 的 PR
+        # stub —— 真实现见 Stage 2
         raise NotImplementedError
         # 让类型检查认 yield
         yield  # type: ignore[unreachable]

@@ -17,6 +17,7 @@ Role = Literal["system", "user", "assistant", "tool"]
 EventKind = Literal[
     "round_start",
     "llm_request",
+    "llm_delta",          # Q1 stream 决议,仅 stream 模式下出现
     "llm_response",
     "tool_call",
     "tool_result",
@@ -24,6 +25,7 @@ EventKind = Literal[
     "final_text",
     "error",
     "cancelled",
+    "context_compacted",  # 上下文 compact 触发后 emit;payload 见 tech-design § 3.5
 ]
 
 
