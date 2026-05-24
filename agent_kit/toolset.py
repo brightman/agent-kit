@@ -19,10 +19,14 @@ import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 from .provider import ToolSchema
 from .types import Event, ToolCall, ToolResult
+
+if TYPE_CHECKING:
+    # 避免 toolset ↔ loop 循环 import:RunRequest 仅类型注解用
+    from .loop import RunRequest
 
 log = logging.getLogger(__name__)
 
@@ -62,7 +66,22 @@ class BaseToolset(ABC):
 
     @abstractmethod
     def build_schemas(self) -> list[ToolSchema]:
-        """暴露给 LLM 的工具 schema 列表。"""
+        """静态 schema 列表。无 request 上下文时被调(也是
+        `build_schemas_for_request` 的默认 fallback)。"""
+
+    def build_schemas_for_request(
+        self, request: "RunRequest"
+    ) -> list[ToolSchema]:
+        """**per-run 动态 schema**(spec § 5.4)。
+
+        默认 = `self.build_schemas()`(静态 toolset 无需 override)。
+
+        想 per-run 过滤 / 动态生成的 toolset(例如 baizhi `SkillToolsetCatalog`
+        按 `request.enabled_skills` 暴露 `skill_*` 工具)override 这个方法。
+        AgentLoop 每个 `run()` 入口调它,所以同一个 toolset 实例跨多 run
+        可以 advertise 不同 schemas。
+        """
+        return self.build_schemas()
 
     @abstractmethod
     async def execute(self, call: ToolCall, ctx: ToolCallContext) -> ToolResult:
@@ -79,20 +98,38 @@ class ToolsetRouter:
     启动期检测:
     1. toolset.name 唯一(否则 raise ValueError)
     2. ToolSchema.name 跨 toolset 无冲突(否则 raise ValueError)
+
+    `request` 参数(spec § 5.4):
+    - None(默认)= 用 `toolset.build_schemas()` 静态构建。caller 自己
+      创建 Router 而不经过 AgentLoop 时走这条
+    - RunRequest = 用 `toolset.build_schemas_for_request(request)`,toolset
+      可按 request 动态过滤 / 生成 schemas。AgentLoop 每个 run 走这条
     """
 
-    def __init__(self, toolsets: list[BaseToolset]) -> None:
+    def __init__(
+        self,
+        toolsets: list[BaseToolset],
+        *,
+        request: "RunRequest | None" = None,
+    ) -> None:
         self._toolsets = list(toolsets)
         self._owner: dict[str, BaseToolset] = {}
+        self._schemas_by_owner: dict[BaseToolset, list[ToolSchema]] = {}
         # 1. toolset.name 唯一性
         seen_toolset_names: set[str] = set()
         for ts in self._toolsets:
             if ts.name in seen_toolset_names:
                 raise ValueError(f"toolset name collision: {ts.name!r}")
             seen_toolset_names.add(ts.name)
-        # 2. ToolSchema.name 跨 toolset 唯一性
+        # 2. ToolSchema.name 跨 toolset 唯一性 —— 用 request-aware 路径(默认 fallback 静态)
         for ts in self._toolsets:
-            for schema in ts.build_schemas():
+            schemas = (
+                ts.build_schemas_for_request(request)
+                if request is not None
+                else ts.build_schemas()
+            )
+            self._schemas_by_owner[ts] = list(schemas)
+            for schema in schemas:
                 if schema.name in self._owner:
                     raise ValueError(
                         f"tool name collision: {schema.name!r} provided by both "
@@ -101,7 +138,8 @@ class ToolsetRouter:
                 self._owner[schema.name] = ts
 
     def all_schemas(self) -> list[ToolSchema]:
-        return [s for ts in self._toolsets for s in ts.build_schemas()]
+        """Router init 时已经定下的 schema 列表(顺序 = registration order)。"""
+        return [s for ts in self._toolsets for s in self._schemas_by_owner[ts]]
 
     async def execute(self, call: ToolCall, ctx: ToolCallContext) -> ToolResult:
         ts = self._owner.get(call.name)

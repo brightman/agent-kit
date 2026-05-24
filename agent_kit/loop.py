@@ -63,18 +63,29 @@ class AgentLoop:
         hooks: list[Hook] | None = None,
     ) -> None:
         self._provider = provider
-        self._router = ToolsetRouter(toolsets)
+        self._toolsets = list(toolsets)
         self._default_max_rounds = default_max_rounds
         self._prelude = system_prelude
         self._compactor = compactor
         self._hooks = list(hooks or ())
+        # spec § 5.4(Stage 5 修订):Router per-run 重建,见 run()。
+        # 这里不再持有 Router 实例
 
     # ---- public ----
 
     async def aclose(self) -> None:
-        """关闭内部 ToolsetRouter(委托给 router.aclose());
-        Runner 用它在 finally 阶段释放 toolset 资源(单 Router,无重复)。"""
-        await self._router.aclose()
+        """关闭所有 toolset(按 registration order 反序;每个的异常 swallow + log)。
+
+        spec § 5.4 修订:不再委托给 Router(Router 是 per-run 的,
+        生命周期不匹配)。直接遍历 toolsets。
+        """
+        import logging
+        log = logging.getLogger(__name__)
+        for ts in reversed(self._toolsets):
+            try:
+                await ts.aclose()
+            except Exception:  # noqa: BLE001
+                log.warning("toolset aclose failed for %r", ts.name, exc_info=True)
 
     async def run(
         self,
@@ -91,7 +102,13 @@ class AgentLoop:
             return
 
         messages = self._compose_messages(request)
-        all_schemas = self._router.all_schemas()
+        # spec § 5.4:per-request Router 构建,toolset 可按 request 过滤 / 动态生成 schemas
+        try:
+            router = ToolsetRouter(self._toolsets, request=request)
+        except Exception as exc:  # noqa: BLE001
+            yield self._mk_error("setup", exc, None)
+            return
+        all_schemas = router.all_schemas()
         last_usage: dict[str, Any] | None = None
         last_round_start_id: str | None = None
         max_rounds = request.max_rounds or self._default_max_rounds
@@ -249,7 +266,7 @@ class AgentLoop:
                          "result": result.to_dict()},
                     )
                 else:
-                    result = await self._router.execute(call, ctx)
+                    result = await router.execute(call, ctx)
 
                 # --- after_tool hooks ---
                 try:
