@@ -29,7 +29,14 @@ log = logging.getLogger(__name__)
 
 @dataclass
 class ToolCallContext:
-    """每次工具调用统一拿到的上下文。"""
+    """每次工具调用统一拿到的上下文。
+
+    `workspace_ephemeral`:Runner 是否会在 run 结束后 rmtree workspace。
+    - True(默认)= Runner 自建 + 自删,toolset **不应**在 workspace 里
+      跨 run 缓存(数据下次 run 没了)
+    - False = 使用方通过 `Runner.workspace_provider` 注入持久目录,
+      Runner 不动它,toolset 可以放心物化 + 缓存(例如 skill files)
+    """
 
     tenant_id: str
     run_id: str
@@ -38,6 +45,7 @@ class ToolCallContext:
     workspace: Path
     storage: Path
     emit: Callable[[Event], None]
+    workspace_ephemeral: bool = True
     run_state: dict[str, Any] = field(default_factory=dict)
 
 

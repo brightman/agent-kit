@@ -46,7 +46,7 @@ import traceback
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Callable
 
 from .context import ContextCompactor
 from .hooks import Hook
@@ -151,7 +151,23 @@ class Runner:
         hooks: list[Hook] | None = None,
         workspace_root: Path = Path("/tmp/agent-kit-runs"),
         storage_root: Path = Path("./persistent"),
+        workspace_provider: Callable[["RunRequest", str], Path] | None = None,
     ) -> None:
+        """Args 见 spec § 9.1。
+
+        `workspace_provider`:None(默认)= SDK 自建 `workspace_root / <run_id>`
+        + finally rmtree(ephemeral)。传 callable = 使用方完全掌控 workspace
+        路径与生命周期(provider 负责 mkdir,SDK 不删);ctx.workspace_ephemeral
+        随之为 False,toolset 可在 workspace 跨 run 缓存(如 skill files 物化)。
+
+        典型用法:把 baizhi-agent 的 tenant_agent 持久空间映射进 SDK
+            def baizhi_workspace(req, run_id):
+                p = Path(f"/data/baizhi/{req.tenant_id}/agents/{req.agent_id}")
+                p.mkdir(parents=True, exist_ok=True)
+                return p
+
+            Runner(..., workspace_provider=baizhi_workspace)
+        """
         self._provider = provider
         self._toolsets = list(toolsets)
         self._default_max_rounds = default_max_rounds
@@ -160,6 +176,7 @@ class Runner:
         self._hooks = list(hooks or ())
         self._workspace_root = Path(workspace_root)
         self._storage_root = Path(storage_root)
+        self._workspace_provider = workspace_provider
 
     # ---- public ----
 
@@ -169,13 +186,20 @@ class Runner:
         SHOULD 用于服务端 / 持久化场景。
         """
         run_id = _new_run_id()
-        workspace = self._workspace_root / run_id
         loop: AgentLoop | None = None
+        # workspace 与 ephemeral 由 provider 决定;ephemeral=True → SDK 建 + 删
+        workspace: Path | None = None
+        ephemeral = self._workspace_provider is None
 
         try:
             # --- setup ---
             try:
-                workspace.mkdir(parents=True, exist_ok=True)
+                if self._workspace_provider is None:
+                    workspace = self._workspace_root / run_id
+                    workspace.mkdir(parents=True, exist_ok=True)
+                else:
+                    workspace = self._workspace_provider(request, run_id)
+                    # provider 全权负责 mkdir;SDK 不动它
                 # spec § 7.5.1:对任何带 async `connect()` 的 toolset 做 pre-warm,
                 # 让 ToolsetRouter 后续 sync build_schemas 拿到缓存
                 await self._prewarm_toolsets()
@@ -196,6 +220,7 @@ class Runner:
                     workspace=workspace,
                     storage=self._storage_root,
                     emit=lambda evt: None,  # Stage 3: no-op(§ 10.2)
+                    workspace_ephemeral=ephemeral,
                 )
             except Exception as exc:  # noqa: BLE001
                 yield _wrap_error_event("setup", exc)
@@ -215,7 +240,8 @@ class Runner:
                     await loop.aclose()
                 except Exception:  # noqa: BLE001
                     pass
-            if workspace.exists():
+            # 只清理 SDK 自建的 ephemeral workspace;provider 注入的归使用方
+            if ephemeral and workspace is not None and workspace.exists():
                 shutil.rmtree(workspace, ignore_errors=True)
 
     async def run_to_completion(self, request: RunRequest) -> RunResult:

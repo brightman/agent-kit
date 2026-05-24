@@ -352,9 +352,14 @@ class ToolCallContext:
     run_id: str
     skill_name: str | None        # 当前调用所归属的 skill(若工具调用来自 SKILL.md 描述触发)
     cancel: asyncio.Event         # toolset 长任务 SHOULD 周期性 check
-    workspace: Path               # /tmp/agent-kit-runs/<run_id>/,run 结束后由 Runner 删除
+    workspace: Path               # 见 § 9.3:ephemeral 模式 = SDK 自建/自删的 /tmp 子目录;
+                                  # provided 模式 = 使用方注入的持久目录,SDK 不动
     storage: Path                 # 持久存储根目录,toolset 决定子结构
     emit: Callable[[Event], None] # toolset 内部进度事件,event_id 由 toolset 申请
+    workspace_ephemeral: bool = True
+    # ↑ True = workspace 是 SDK 自建,run 结束 rmtree;toolset 不应在此跨 run 缓存
+    # ↑ False = 使用方通过 Runner.workspace_provider 注入持久目录;toolset 可
+    #   放心物化 + 缓存(skill files / dependency cache 等)
     # ↑ 进度事件可在 Stage 2 加 helper("tool_progress")
 ```
 
@@ -867,10 +872,20 @@ class Runner:
         *,
         default_max_rounds: int = 10,
         system_prelude: str = "",
+        compactor: ContextCompactor | None = None,
+        hooks: list[Hook] | None = None,
         workspace_root: Path = Path("/tmp/agent-kit-runs"),
         storage_root: Path = Path("./persistent"),
+        workspace_provider: Callable[[RunRequest, str], Path] | None = None,
     ) -> None: ...
 ```
+
+`workspace_provider`(Stage 4 后修订 2026-05-24):**None**(默认)= ephemeral
+模式,SDK 自建 `workspace_root / <run_id>` + finally rmtree。**callable** =
+provided 模式,使用方完全掌控 workspace 路径与生命周期(provider 负责 mkdir,
+SDK 不删);`ctx.workspace_ephemeral` 随之为 False,toolset 可在 workspace 跨
+run 缓存(典型场景:把 baizhi-agent 的 tenant_agent 持久空间映射进 SDK,
+SKILL 内嵌的 script 在 workspace 里跑产物留下,见 § 16)。
 
 > **修订 2026-05-24**:
 > - 删除 `mcp_servers: list[McpServerConfig]` 参数(原来是糖)
@@ -1210,6 +1225,53 @@ Stage 重做;baizhi-agent / fam-runtime 在 Stage 6/7 之前完全不受影响�
 | Partial tool_call delta | 后期 | § 4.4 暂用完整 ToolCall 当 delta |
 | Tool 内部进度事件 helper | Stage 2 候选 | § 5.2 已留 `ctx.emit` |
 | Cancel by run_id 的 Runner API | Stage 2 决定形态 | § 9.4 |
+| **Sandbox / 受限执行抽象** | 上层(见 § 16) | 三场景全部已有外部解,SDK 不重造 |
+| **Script executor / Skill scripts toolset** | 上层 | 由 `BaseToolset` + `Runner.workspace_provider` 拼装,见 § 16 recipes |
+
+---
+
+## 16. Sandbox 与 script 执行(策略,不在 SDK 内)
+
+**决策**:agent-kit **不**内置 sandbox 抽象、不内置 script executor、不内置
+skill script toolset。所有 sandbox/受限执行场景由上层组装。
+
+### 16.1 决策依据
+
+讨论历史(2026-05-24)考察了三家方案:
+
+| 参考 | 模型 | 我们是否照抄 |
+|---|---|---|
+| **ADK `BaseCodeExecutor`** | 从 LLM response 抽 markdown code block,跑后回填 | **不**。要求 Gemini 风格 LLM 行为;跟 tool call 协议抢 turn |
+| **openai-agents `BaseSandboxSession`** | 长 lived workspace + capabilities + 7 个 provider extension(E2B/Modal/Daytona/…) | **不**。`BaseSandboxSession` 单文件 1200 行,远超我们 SDK 总量;snapshot/manifest/PTY 不是机制是 product |
+| **`ScriptExecutor` Protocol 自创** | SDK 给契约,使用方写 adapter | **不**。三大真实场景全部已有外部解 → 契约成空壳 |
+
+三大真实场景与对应外部解:
+
+| 需求 | 上层方案 | SDK 提供 |
+|---|---|---|
+| 长 lived workspace 跑 agent(baizhi-agent tenant_agent 空间) | application 层维护 workspace + toolset cwd=workspace | `Runner.workspace_provider`(§ 9.1) |
+| 本地受限执行 | Anthropic SRT(https://github.com/anthropic-experimental/sandbox-runtime),Toolset 命令前缀 `srt …` | 零 |
+| 远程 / 隔离执行 | MCP server(filesystem / shell / e2b / Docker) | 已支持(§ 7) |
+
+### 16.2 SDK 边界变化
+
+- **新增** `Runner.workspace_provider`(§ 9.1):允许外部 workspace 注入,
+  Runner 不建不删 → 让上面三场景都能拿到 baizhi-agent 持久空间
+- **新增** `ToolCallContext.workspace_ephemeral`(§ 5.2):toolset 自检"我能不
+  能在 workspace 里跨 run 缓存"
+- **不增加**任何 sandbox / executor / script 相关 module、Protocol、
+  dataclass。曾在 stage-4 后短暂存在的 `agent_kit/sandbox.py`(`ScriptExecutor`
+  Protocol + `LocalSubprocessExecutor`)已删除 —— 因为它在三场景下都被外部方
+  案吃掉,留着会误导后来人
+
+### 16.3 Recipes(待写,Stage 6 baizhi-agent 接入时回填)
+
+- `docs/recipes/workspace.md`:把 baizhi 的 tenant_agent 空间映射进 SDK
+  (`workspace_provider` 用法)
+- `docs/recipes/local-restricted-with-srt.md`:本地 Toolset 用 SRT 跑 trusted script
+- `docs/recipes/sandbox-via-mcp.md`:用 mcp-server-shell / e2b MCP 当远程 sandbox
+- `docs/recipes/skill-scripts.md`:SKILL 内嵌 script 怎么由上层 toolset 物化 +
+  执行(纯 application-layer 模式,不在 SDK)
 
 ---
 

@@ -544,3 +544,125 @@ async def test_run_to_completion_events_match_run(tmp_path: Path) -> None:
     aggr_kinds = [e.kind for e in result.events]
 
     assert stream_kinds == aggr_kinds
+
+
+# ---- workspace_provider (external workspace injection) ----
+
+
+@pytest.mark.asyncio
+async def test_workspace_provider_returned_path_used(tmp_path: Path) -> None:
+    """Runner uses provider's path for ctx.workspace, ignores workspace_root."""
+    external = tmp_path / "tenant_42" / "agent_x"
+    external.mkdir(parents=True)
+
+    seen: dict[str, Any] = {}
+
+    class _Probe(Hook):
+        async def before_model(self, ctx, messages, tools):
+            seen["workspace"] = ctx.workspace
+            seen["ephemeral"] = ctx.workspace_ephemeral
+            return None
+
+    def provider_fn(req, run_id):
+        seen["provider_called_with"] = (req.tenant_id, req.agent_id, run_id)
+        return external
+
+    provider = _ScriptedProvider([LlmResponse(text="ok", tool_calls=[])])
+    runner = Runner(
+        provider, toolsets=[], hooks=[_Probe()],
+        workspace_root=tmp_path / "ws_should_be_ignored",
+        workspace_provider=provider_fn,
+    )
+    await runner.run_to_completion(_basic_req())
+
+    assert seen["workspace"] == external
+    assert seen["ephemeral"] is False
+    tid, aid, rid = seen["provider_called_with"]
+    assert tid == "t"
+    assert aid == "a"
+    assert rid  # non-empty
+
+
+@pytest.mark.asyncio
+async def test_workspace_provider_path_not_deleted(tmp_path: Path) -> None:
+    """Provider-injected workspace must survive after run() completes."""
+    external = tmp_path / "persistent" / "agent_x"
+    external.mkdir(parents=True)
+    # drop a sentinel file so we can verify cross-run persistence
+    sentinel = external / "sentinel.txt"
+    sentinel.write_text("hello")
+
+    provider = _ScriptedProvider([LlmResponse(text="ok", tool_calls=[])])
+    runner = Runner(
+        provider, toolsets=[],
+        workspace_provider=lambda req, run_id: external,
+    )
+    await runner.run_to_completion(_basic_req())
+
+    assert external.exists()
+    assert sentinel.read_text() == "hello"
+
+
+@pytest.mark.asyncio
+async def test_workspace_provider_does_not_mkdir(tmp_path: Path) -> None:
+    """SDK never mkdirs the provider-returned path; provider owns lifecycle.
+
+    If provider returns a non-existent path AND doesn't create it,
+    setup itself doesn't fail (Runner just hands the path to ctx);
+    any toolset that tries to write will get a normal FileNotFoundError —
+    that's the provider's contract violation, not SDK's responsibility.
+    """
+    ghost = tmp_path / "never_created_by_anyone"
+    assert not ghost.exists()
+
+    provider = _ScriptedProvider([LlmResponse(text="ok", tool_calls=[])])
+    runner = Runner(
+        provider, toolsets=[],
+        workspace_provider=lambda req, run_id: ghost,
+    )
+    await runner.run_to_completion(_basic_req())
+
+    # Runner did NOT silently create it
+    assert not ghost.exists()
+
+
+@pytest.mark.asyncio
+async def test_ctx_workspace_ephemeral_default_true(tmp_path: Path) -> None:
+    """No provider → ctx.workspace_ephemeral is True (SDK self-managed)."""
+    seen: dict[str, Any] = {}
+
+    class _Probe(Hook):
+        async def before_model(self, ctx, messages, tools):
+            seen["ephemeral"] = ctx.workspace_ephemeral
+            seen["workspace"] = ctx.workspace
+            return None
+
+    provider = _ScriptedProvider([LlmResponse(text="ok", tool_calls=[])])
+    runner = Runner(
+        provider, toolsets=[], hooks=[_Probe()],
+        workspace_root=tmp_path / "ws",
+    )
+    await runner.run_to_completion(_basic_req())
+
+    assert seen["ephemeral"] is True
+    # workspace was deleted by Runner finally
+    assert not seen["workspace"].exists()
+
+
+@pytest.mark.asyncio
+async def test_workspace_provider_raises_yields_setup_error(tmp_path: Path) -> None:
+    """provider that raises → error event stage=setup, NOT a crash."""
+
+    def boom_provider(req, run_id):
+        raise RuntimeError("provider exploded")
+
+    provider = _ScriptedProvider([LlmResponse(text="ok", tool_calls=[])])
+    runner = Runner(
+        provider, toolsets=[],
+        workspace_provider=boom_provider,
+    )
+    events = [e async for e in runner.run(_basic_req())]
+    error_evts = [e for e in events if e.kind == "error"]
+    assert len(error_evts) == 1
+    assert error_evts[0].payload["stage"] == "setup"
+    assert "provider exploded" in error_evts[0].payload["message"]
