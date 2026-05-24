@@ -877,24 +877,32 @@ async def run_to_completion(self, request: RunRequest) -> RunResult:
     SHOULD 用于脚本 / 测试 / 一次性 CLI 场景。"""
 ```
 
-### 9.3 资源生命周期
+### 9.3 资源生命周期(Stage 3 修订 2026-05-24)
 
 ```
 Runner.run(request):
-  1. allocate run_id (ULID)
+  1. allocate run_id (event-id-style; § 11)
   2. mkdir workspace = workspace_root / run_id
-  3. build ToolCallContext (cancel = asyncio.Event())
-  4. build ToolsetRouter(self._toolsets)
-     ↑ toolsets 由使用方构造,Runner 不 new。Router init 期间检测命名冲突。
-  5. build AgentLoop(provider, self._toolsets, prelude=self._prelude + request.system_prelude)
+  3. build prelude:
+       - Runner.system_prelude
+       - skill catalog 段(if SkillCatalogToolset discovered + enabled_skills 非空,§ 10.1)
+       - RunRequest.system_prelude
+  4. build AgentLoop(provider, self._toolsets, system_prelude=composed_prelude, ...)
+     ↑ AgentLoop 内部 build ToolsetRouter,做命名冲突校验
+  5. build ToolCallContext (cancel = asyncio.Event(), workspace, storage, emit=no-op)
   6. try:
        async for evt in loop.run(request, ctx): yield evt
      except Exception as exc:
-       yield Event(kind="error", payload={...}); return
+       yield Event(kind="error", stage="loop", payload={...}); return
      finally:
-       await router.aclose()              # 关 MCP session / 释放 toolset 资源
-       shutil.rmtree(workspace)           # 删 workspace
+       await loop.aclose()                # 委托给 router.aclose() —— 单 router,无重复
+       shutil.rmtree(workspace, ignore_errors=True)
 ```
+
+> **关于"单 ToolsetRouter"**:原 spec 草稿要求 Runner 自建一份 Router 做命名
+> 冲突 + aclose,与 AgentLoop 内部 Router 重复。Stage 3 修订改为
+> **AgentLoop 暴露 `aclose()`** 委托给自己的 router;Runner 不再持有 Router 实例。
+> 单一 Router,语义干净。
 
 > **关于 toolset 复用**:Runner 不持有 toolset 实例 == 不掌控其生命周期。
 > - 若使用方传入的是**短命** toolset(只这一次 run 用),Runner 的 `router.aclose()`
@@ -940,6 +948,39 @@ a skill's full instructions before invoking it.
 - `[Runner.system_prelude]` 和 `[RunRequest.system_prelude]` 拼接,用单个空行隔
 - "Available Skills" 段当 `enabled_skills` 非空时才加
 - 工具列表通过 provider 的 `tools` 参数发,不进 system prompt 文本
+
+### 10.1 Skill catalog 来源(Stage 3 修订 2026-05-24)
+
+Runner **不**新增 `skill_registry` 参数(保持 § 9.1 "不为你 new toolset" 的边界)。
+取而代之:Runner 启动时**遍历 `self._toolsets`**,找到 `SkillCatalogToolset`
+实例(`isinstance` 检测),从中读取 `_registry` 和 `_tenant_id`,调
+`registry.list(tenant_id)` 拿到所有 frontmatter,再按 `request.enabled_skills`
+过滤,生成 "Available Skills" 段。
+
+边界规则:
+- 若 toolsets 列表中**没有** `SkillCatalogToolset`,Available Skills 段始终为空
+  (使用方必须自己把 enabled skill 描述塞进 `RunRequest.system_prelude`)
+- 若有**多个** `SkillCatalogToolset`(多 tenant 场景,目前不推荐),取第一个
+- `enabled_skills` 支持 `name@version` 字符串;prelude 注入用 `registry.list()` 拿
+  的是 latest frontmatter,**version pin 只对 LLM 的 `load_skill` 调用生效**
+  —— 因为 description 通常跨版本稳定,prelude 不值得对每个 ref 单独 `load()`
+- `enabled_skills` 里指定了但 registry 没找到的 skill → 静默跳过(不 raise,
+  不 emit warning event)。使用方有责任传入有效的 ref
+
+> **为什么不加 `skill_registry` 参数**:Runner 的契约是"不 new toolset、不掌
+> 控 toolset lifecycle"。如果 Runner 拿到 registry 就能自己 new
+> `SkillCatalogToolset`,势必引入"Runner 是不是该新 / 该关"的歧义。改用
+> discovery 把 SkillCatalogToolset 当成 prelude 数据源,语义清晰:**toolsets
+> 列表既是工具源也是 prelude 元数据源**,单一真相。
+
+### 10.2 Runner 与 ctx.workspace / ctx.storage / ctx.emit
+
+- `workspace = workspace_root / run_id`:Runner.run 开始 mkdir,finally 删
+- `storage = storage_root`:不分 run,toolsets 自决子结构
+- `ctx.emit`:Stage 3 暂为 no-op(`lambda evt: None`)。toolsets 调它的进度事件
+  会被丢弃。**Stage 3.5 / Stage 4 候选**:用 asyncio.Queue 把 emit 路由进 Runner
+  yield 的事件流。当前 SDK 内置 toolset(SkillCatalogToolset)不调 emit,
+  无影响
 
 ---
 

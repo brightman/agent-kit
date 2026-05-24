@@ -70,6 +70,11 @@ class AgentLoop:
 
     # ---- public ----
 
+    async def aclose(self) -> None:
+        """关闭内部 ToolsetRouter(委托给 router.aclose());
+        Runner 用它在 finally 阶段释放 toolset 资源(单 Router,无重复)。"""
+        await self._router.aclose()
+
     async def run(
         self,
         request: RunRequest,
