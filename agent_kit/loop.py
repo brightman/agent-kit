@@ -20,6 +20,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator
 
+from ._errors import unwrap_to_leaf
 from .context import ContextCompactor, _assert_tool_pairs_intact
 from .hooks import Hook
 from .provider import LlmProvider, LlmResponse, ToolSchema
@@ -387,15 +388,17 @@ class AgentLoop:
     def _mk_error(
         self,
         stage: str,
-        exc: Exception,
+        exc: BaseException,
         parent_event_id: str | None,
         *,
         extra: dict[str, Any] | None = None,
     ) -> Event:
+        leaf = unwrap_to_leaf(exc)
         payload: dict[str, Any] = {
             "stage": stage,
-            "exc_type": exc.__class__.__name__,
-            "message": str(exc),
+            "exc_type": leaf.__class__.__name__,
+            "message": str(leaf),
+            # traceback 用原 exc(可能 ExceptionGroup)保留完整链
             "traceback": "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
         }
         if extra:

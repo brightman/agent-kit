@@ -66,6 +66,8 @@ agent-kit 是一个从 baizhi-agent / fam-runtime / ADK / OpenHarness 四家共�
 | `runner.py` | ✅ `Runner.run()` + `run_to_completion()` + `RunResult` + workspace lifecycle + skill catalog discovery + **toolset pre-warm** | `Runner`, `RunResult` |
 | `mcp.py` | ✅ `McpServerConfig` + `McpToolset`(stdio/sse/http)+ `${VAR}` + lazy connect + idempotent aclose + `toolsets_from_configs` | `McpToolset`, `McpServerConfig`, `toolsets_from_configs` |
 | `__init__.py` | ✅ 公开 API re-export(含 mcp) | 见 `agent_kit/__init__.py` |
+| `contrib/skills.py` | ✅ `FilesystemSkillRegistry` reference 实现(读 only,扫 `<skills_root>/<dir>/SKILL.md`) | `from agent_kit.contrib.skills import FilesystemSkillRegistry` |
+| `_errors.py` | ✅ `unwrap_to_leaf(BaseExceptionGroup) → leaf BaseException` —— error event 诊断辅助 | 内部模块,loop / runner 自用 |
 
 ---
 

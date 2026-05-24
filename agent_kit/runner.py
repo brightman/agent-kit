@@ -48,6 +48,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable
 
+from ._errors import unwrap_to_leaf
 from .context import ContextCompactor
 from .hooks import Hook
 from .loop import AgentLoop, RunRequest
@@ -91,12 +92,15 @@ def _now_event(kind: str, payload: dict[str, Any]) -> Event:
 
 
 def _wrap_error_event(stage: str, exc: BaseException) -> Event:
+    leaf = unwrap_to_leaf(exc)
     return _now_event(
         "error",
         {
             "stage": stage,
-            "exc_type": exc.__class__.__name__,
-            "message": str(exc),
+            "exc_type": leaf.__class__.__name__,
+            "message": str(leaf),
+            # 注意:traceback 用原 exc(可能是 ExceptionGroup),保留完整链,
+            # 不丢上下文。`exc_type` / `message` 用 leaf,人读时根因清楚
             "traceback": "".join(
                 traceback.format_exception(type(exc), exc, exc.__traceback__)
             ),
