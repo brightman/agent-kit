@@ -47,7 +47,7 @@
 - HTTP API
 - 鉴权 / 配额
 - UI / 前端
-- Memory / Session(可能 Stage 8+ 单独 spec)
+- Memory / Session(可能后续单独 spec)
 - 多 agent 编排
 
 ---
@@ -506,7 +506,6 @@ class McpServerConfig:
     url: str | None = None                             # sse / http
     headers: dict[str, str] = field(default_factory=dict)   # 支持 ${VAR}
     env: dict[str, str] = field(default_factory=dict)       # 支持 ${VAR}
-    lifecycle: McpLifecycle = McpLifecycle.PER_CALL
 
     def __post_init__(self):
         if self.transport == "stdio" and not self.command:
@@ -515,16 +514,36 @@ class McpServerConfig:
             raise ValueError(...)
 ```
 
-### 7.2 McpLifecycle 四档语义
+> **修订 2026-05-24**:删除 `lifecycle: McpLifecycle` 字段。理由见 § 7.2。
+> 原 4 档枚举见 `proposal.md § 八` 历史 + errata。
 
-| 档 | 何时 拉起 / 关闭 | 共享范围 | 适用场景 |
-|---|---|---|---|
-| `PER_CALL` | 每次 `execute()` 拉起 + 关闭 | 无 | 调试 / 强隔离审计 / baizhi-agent 当前 |
-| `PER_RUN` | Runner.run 开始时 lazy 拉起,run 结束时 aclose | 单次 run | 一个 agent run 多次调同一 MCP server |
-| `PER_TENANT` | tenant 首次需要时拉起,LRU 驱逐 / 显式 close 时关闭 | 同 tenant 的多次 run | Fam 风格(按 family_id 缓存) |
-| `GLOBAL` | 进程启动时 eager 拉起(或首次需要时 lazy),进程退出时关闭 | 全进程 | OH 风格 / 单租户单机部署 |
+### 7.2 Lifecycle 设计 —— 实例生命周期即 session 生命周期
 
-**Stage 1 实现范围**:仅 `PER_CALL` 和 `PER_RUN`。`PER_TENANT` / `GLOBAL` 留 Stage 4。
+**SDK 不枚举 lifecycle**。`agent-kit` 采用 ADK 的模式:
+
+- 一个 `McpToolset` 实例 == 一个 MCP server == 一个 MCP session
+- session 的生命周期 == `McpToolset` 实例的生命周期
+- 使用方控制何时构造、何时 `aclose` —— **这就是 lifecycle 的全部控制点**
+
+**为什么不枚举**:之前考虑过 4 档(PER_CALL / PER_RUN / PER_TENANT / GLOBAL),
+但 `PER_TENANT` 把"tenant"这一上层概念塞进 SDK 命名空间,与 § 1 / § 15 "SDK
+不做多租户"的边界直接冲突。`GLOBAL` 也暗示 SDK 持有进程级缓存,挤占使用方
+的部署决策权。
+
+ADK / OpenHarness / baizhi-agent / fam-runtime **均无 lifecycle 枚举**:
+- ADK:McpToolset 实例生命周期 = session 生命周期。使用方通过"何时 new"控制
+- OH:进程单例(部署形态固定)
+- baizhi-agent:per-call(代码内 hardcode)
+- fam-runtime:per-family-id 缓存(代码内 hardcode)
+
+**4 档行为仍可全部实现**,只是控制点回到使用方:
+
+| 想要 | 使用方怎么写 |
+|---|---|
+| **per-call** 强隔离 | 包一层 `EphemeralMcpToolset`,每次 `execute` 内部 `McpToolset(cfg)` + use + `aclose` |
+| **per-run** 默认 | `Runner(toolsets=[McpToolset(cfg)])`;Runner 在 run 结束统一 `router.aclose()` |
+| **per-tenant** | 使用方维护 `dict[tenant_id, McpToolset]`,run 时取实例传给 Runner |
+| **global** | 模块级单例 `MCP_GITHUB = McpToolset(cfg)`,所有 run 共享 |
 
 ### 7.3 ${VAR} 替换规则
 
@@ -546,18 +565,32 @@ class McpToolset(BaseToolset):
         self._config = config
         self._secrets = secrets or {}
         self.name = f"mcp__{config.name}"
+        self._session = None     # lazy: 首次 build_schemas / execute 时 connect
 
     def build_schemas(self) -> list[ToolSchema]:
-        """首次调用拉起 session,list_tools,缓存。后续 build_schemas 返回缓存。
-        Stage 1 实现:同步 wrapper(asyncio.run 在 init 中,与 baizhi-agent mcp_session 一致)"""
+        """首次调用 lazy connect + list_tools + 缓存。后续返回缓存 schemas。
+        Stage 1 实现:同步 wrapper(asyncio.run 在 init 中,与 baizhi-agent
+        mcp_session 一致)。"""
 
     async def execute(self, call: ToolCall, ctx: ToolCallContext) -> ToolResult:
-        """按 lifecycle 拉起 / 复用 ClientSession,call tool,返回结果。
+        """复用 self._session(若未 connect 则 lazy connect),call tool,返回。
         - isError=True 的 MCP 响应 → ToolResult(is_error=True, content=msg)
         - 传输 / SDK 异常 → ToolResult(is_error=True, content=f"ERROR: {exc}")"""
 
     async def aclose(self) -> None:
-        """关闭所有按本 lifecycle 持有的 session。"""
+        """关闭 self._session(若已 connect)。idempotent。"""
+```
+
+### 7.6 便利函数(可选)
+
+```python
+def toolsets_from_configs(
+    configs: list[McpServerConfig],
+    *,
+    secrets: dict[str, str] | None = None,
+) -> list[McpToolset]:
+    """批量构造。等价于 `[McpToolset(c, secrets=secrets) for c in configs]`。
+    存在意义:语义化的工厂函数,非必需。"""
 ```
 
 ---
@@ -654,15 +687,36 @@ class Runner:
     def __init__(
         self,
         provider: LlmProvider,
-        skill_registry: SkillRegistry,
-        mcp_servers: list[McpServerConfig] | None = None,
-        extra_toolsets: list[BaseToolset] | None = None,
+        toolsets: list[BaseToolset],            # 包括 SkillCatalogToolset / McpToolset / 自定义
         *,
         default_max_rounds: int = 10,
         system_prelude: str = "",
         workspace_root: Path = Path("/tmp/agent-kit-runs"),
         storage_root: Path = Path("./persistent"),
     ) -> None: ...
+```
+
+> **修订 2026-05-24**:
+> - 删除 `mcp_servers: list[McpServerConfig]` 参数(原来是糖)
+> - 删除 `skill_registry: SkillRegistry` 参数(改由使用方手动包装为 `SkillCatalogToolset` 放进 `toolsets`)
+> - `extra_toolsets` 重命名为 `toolsets`(不再"额外",而是"全部")
+>
+> 理由:Runner 不再为你 new toolset == Runner 不掌握 toolset 实例的 lifecycle
+> == 使用方完全控制"什么时候 new、什么时候 close"。详见 § 7.2。
+
+**典型构造**:
+
+```python
+runner = Runner(
+    provider=LiteLlmProvider("minimax/MiniMax-M2.7"),
+    toolsets=[
+        SkillCatalogToolset(skill_registry, tenant_id="user_42"),
+        *toolsets_from_configs([
+            McpServerConfig(name="github", transport="stdio", command=["mcp-github"]),
+            McpServerConfig(name="WebSearch", transport="http", url="..."),
+        ]),
+    ],
+)
 ```
 
 ### 9.2 双 API(Q4 决议)
@@ -684,12 +738,9 @@ Runner.run(request):
   1. allocate run_id (ULID)
   2. mkdir workspace = workspace_root / run_id
   3. build ToolCallContext (cancel = asyncio.Event())
-  4. materialize toolsets:
-       - SkillCatalogToolset(skill_registry, request.tenant_id)
-       - for cfg in mcp_servers: McpToolset(cfg)    # 按 lifecycle 不同,这里可能 lazy
-       - + extra_toolsets
-     合并去重(Router init 检冲突)
-  5. build AgentLoop(provider, toolsets, prelude=self._prelude + request.system_prelude)
+  4. build ToolsetRouter(self._toolsets)
+     ↑ toolsets 由使用方构造,Runner 不 new。Router init 期间检测命名冲突。
+  5. build AgentLoop(provider, self._toolsets, prelude=self._prelude + request.system_prelude)
   6. try:
        async for evt in loop.run(request, ctx): yield evt
      except Exception as exc:
@@ -697,6 +748,17 @@ Runner.run(request):
      finally:
        await router.aclose()              # 关 MCP session / 释放 toolset 资源
        shutil.rmtree(workspace)           # 删 workspace
+```
+
+> **关于 toolset 复用**:Runner 不持有 toolset 实例 == 不掌控其生命周期。
+> - 若使用方传入的是**短命** toolset(只这一次 run 用),Runner 的 `router.aclose()`
+>   会在 finally 关掉,session 随之关 —— 这是 "per-run" 行为
+> - 若使用方传入的是**长命** toolset(模块级单例 / 自家 cache),`router.aclose()`
+>   仍会被调,但 toolset.aclose 可以 idempotent + 拒绝真关(由使用方自己实现)
+>   —— 这是 "global" / "per-tenant" 行为
+>
+> 推荐惯例:**短命 toolset 让 Runner 关;长命 toolset 自己实现 aclose 为 no-op
+> 或 refcount,使用方独立显式 close**。SDK 不强制。
 ```
 
 ### 9.4 取消(外部触发)
@@ -800,11 +862,10 @@ a skill's full instructions before invoking it.
 | **1** | types / provider / toolset / skill 实现 + 单元测试 | 30+ 单测全绿 |
 | **2** | loop 实现(非 stream + cancel + max_rounds) + 集成测试 | FakeProvider 跑通 flashidea |
 | **3** | runner 实现(run + run_to_completion + 资源生命周期) + 端到端测试 | RunResult 行为符合契约 |
-| **4** | mcp 实现(PER_CALL + PER_RUN,wrap `mcp` SDK) + 真打测试 | 真打 DashScope WebSearch OK |
+| **4** | mcp 实现(lazy connect + aclose,wrap `mcp` SDK) + 真打测试 | 真打 DashScope WebSearch OK,4 种使用方 lifecycle 用例(per-call / per-run / per-tenant / global)各跑一次 |
 | **5** | stream 实现(Q1 决议) + provider.chat_stream 接 LiteLLM 等 | stream/non-stream 切换不破坏 |
 | **6** | baizhi-agent 替换内部 runner → agent-kit.Runner | baizhi-agent pytest 不退化 |
 | **7** | fam-runtime 替换 | fam-runtime pytest 不退化 |
-| **8** | (可选)PER_TENANT / GLOBAL MCP lifecycle | 多 run 复用 session 验证 |
 
 **回退路径**:每 Stage 独立 commit + tag。任意 Stage 发现抽象不对,可回滚上一
 Stage 重做;baizhi-agent / fam-runtime 在 Stage 6/7 之前完全不受影响。
@@ -822,8 +883,8 @@ Stage 重做;baizhi-agent / fam-runtime 在 Stage 6/7 之前完全不受影响�
 | HTTP / WebSocket API | FastAPI / Flask / etc. | 框架口味不一 |
 | 前端 UI / React | 上层 | 业务态 |
 | 鉴权 / 配额 | 上层 | 业务态 |
-| Memory / Session | Stage 8+ 单独 spec(候选) | 四家分歧大 |
-| Agent-to-agent 编排 | 上层或 Stage 8+ 候选 | ADK 有,其他无 |
+| Memory / Session | 后续单独 spec(候选,无具体 Stage) | 四家分歧大 |
+| Agent-to-agent 编排 | 上层 OR 后续候选(无具体 Stage) | ADK 有,其他无 |
 | 多模态(ContentBlock) | Stage 6+ 看真实需求 | Q3 决议 |
 | Partial tool_call delta | 后期 | § 4.4 暂用完整 ToolCall 当 delta |
 | Tool 内部进度事件 helper | Stage 2 候选 | § 5.2 已留 `ctx.emit` |
@@ -843,7 +904,7 @@ Stage 重做;baizhi-agent / fam-runtime 在 Stage 6/7 之前完全不受影响�
 | Progressive disclosure | 四家收敛 |
 | `mcp__<server>__<tool>` 命名 | OpenHarness / baizhi-agent / fam-runtime |
 | 直接 wrap Anthropic `mcp` SDK | baizhi-agent PR f6 教训 |
-| MCP lifecycle 4 档 | 四家全集 |
+| **MCP lifecycle 不枚举,实例生命周期 = session 生命周期** | ADK(2026-05-24 修订;原 4 档枚举见 proposal.md errata) |
 | 每 skill 独立 storage | baizhi-agent / fam-runtime |
 | ToolCallContext 统一合同 | ADK Tool.run_async + baizhi-agent toolsets.py |
 | 命名冲突启动期检测 | baizhi-agent LlmAgentRunner |

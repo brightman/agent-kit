@@ -363,3 +363,31 @@ async for evt in runner.run(RunRequest(
    后退出,还是直接向上抛?目前倾向前者(更"事件流"),但要确认。
 
 这些不阻塞 Stage 1,但 Stage 3(loop 实现)之前要定。
+
+---
+
+## Errata · MCP lifecycle 4 档枚举撤回(2026-05-24)
+
+**类别**:本提案 § 八 中提出的 `McpLifecycle` 4 档枚举(per_call / per_run /
+per_tenant / global)在 [`tech-design.md` § 7.2](tech-design.md#72-lifecycle-设计--实例生命周期即-session-生命周期)
+中**已撤回**,采纳 ADK 的"实例生命周期 = session 生命周期"模式。
+
+**为什么撤回**:
+- `PER_TENANT` 把"tenant"这一上层概念塞进 SDK 命名空间,与 SDK Non-goals
+  ("不做多租户")直接冲突
+- `GLOBAL` 暗示 SDK 持有进程级缓存,挤占使用方的部署决策权
+- ADK / OpenHarness / baizhi-agent / fam-runtime **均无 lifecycle 枚举**,
+  各自按部署形态在使用方代码里 hardcode 一档
+- 4 档行为仍可全部实现,只是控制点回到使用方(`McpToolset` 何时构造、何时 aclose)
+
+**连带变更**(详见 tech-design.md):
+- `McpServerConfig.lifecycle` 字段删除
+- `Runner.__init__` 参数从 `(provider, skill_registry, mcp_servers, extra_toolsets)`
+  简化为 `(provider, toolsets)` —— Runner 不再为使用方 new toolset
+- Stage 4 退出标准更新:不再"实现 PER_CALL + PER_RUN",改为"lazy connect + aclose
+  打通,4 种使用方 lifecycle 用例各跑一次"
+
+**提案 § 八 / § 十二 / § 十三的原文不动**(append-only),仅以本 errata 标注修订。
+
+---
+
