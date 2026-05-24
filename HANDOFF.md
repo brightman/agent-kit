@@ -9,9 +9,10 @@ Claude/Codex agent。读完应能直接接 Stage 5 干活。
 
 agent-kit 是一个从 baizhi-agent / fam-runtime / ADK / OpenHarness 四家共识里
 抽出来的最小 Python 工具包,提供 agent loop + skill + MCP 的机制(不绑策略)。
-当前进度 = **Stage 4 + Runner.workspace_provider + 不内置 sandbox 决议** 已落地,
-197 tests 全绿,**Stage 5 改为 baizhi-agent 接入**(原 Stage 5 stream 已推迟,
-理由见 spec § 14 修订 2026-05-24)。
+当前进度 = **Stage 4 + Runner.workspace_provider + 不内置 sandbox 决议 + per-request schema hook
++ contrib.FilesystemSkillRegistry + Runner.run_sync** 已落地,237 tests 全绿。
+**Stage 5 baizhi 接入进行中:切片 A(类型 alias)+ 切片 B(McpToolset)已落 baizhi-agent
+仓库;切片 D(LlmAgentRunner 整体换 backend)待办**。
 
 ---
 
@@ -20,9 +21,9 @@ agent-kit 是一个从 baizhi-agent / fam-runtime / ADK / OpenHarness 四家共�
 | 维度 | 状态 |
 |---|---|
 | 仓库根 | `/Users/karama/Documents/baizhi/agent-kit/`(无 remote,本地 main)|
-| 最新 commit | `1410c50` — baizhi pptx + websearch e2e harness;前一个 `32765a2` Runner.workspace_provider + § 16 sandbox-by-recipe |
+| 最新 commit | `319d4c5` — Runner.run_sync(openai-agents 形态);前面有 `4ac1fca` per-request schema hook、`e6411b2` contrib.FilesystemSkillRegistry、`87b9dfe` ExceptionGroup unwrap、`2fccbdb` live e2e retry |
 | 最新 tag | `stage-4`(stage-5/6 标号 + 内容已重排,见下) |
-| 测试 | **197 通过 + 1 skipped(live)**,`~0.35s` |
+| 测试 | **237 通过 + 1 skipped(live)**,`~0.5s`;live e2e:24s ✅ |
 | Python | 3.11(`.venv/` 已建好,gitignored) |
 | 关键 deps | `mcp>=1.0` / `pyyaml` / `pydantic`;dev: `pytest` / `pytest-asyncio` / `anyio` / `python-pptx`(给 baizhi e2e)|
 
@@ -83,74 +84,82 @@ agent-kit 是一个从 baizhi-agent / fam-runtime / ADK / OpenHarness 四家共�
 
 ---
 
-## Stage 5 接力(立即可干)
+## Stage 5 接力 — baizhi-agent 接入(进行中)
 
-**目标**:**baizhi-agent 接入** —— 把 baizhi-agent 内部 runner 替换成
-`agent_kit.Runner`,真 provider / real SkillRegistry / real WebSearch MCP
-接通,pptx e2e 跑通。原"Stage 5 stream"已推迟到 Stage 7+(理由见 spec § 14 修
-订;一句话:agent-kit 是 server-side machinery,现有 event 流够覆盖 90%,
-stream 真要时再做)。
+**目标**:把 baizhi-agent 内部 runner 替换成 `agent_kit.Runner`,baizhi
+pytest 不退化,pptx e2e live test 跑通。
 
-### 已有的接入脚手架(本次 session 已交付)
+原"Stage 5 stream"已推迟到 Stage 7+(spec § 14 修订;agent-kit 是 server-side
+machinery,现有 event 流够覆盖 90%)。
 
-- `tests/test_baizhi_pptx_websearch_integration.py` —— **in-process** 集成测试,
-  覆盖真 pptx SKILL.md bundle + `web-search` MCP server_id + 整个 loop 用
-  scripted provider 模拟,无网络、确定性。当前**全绿**
-- `tests/test_baizhi_e2e_live_pptx_websearch.py` —— **opt-in live** 测试,
-  `@pytest.mark.live`,默认跳过。`pytest -m live` + 真 LLM/MCP secrets
-  exported 才跑;产物落 `e2e-output/`(已 gitignore)
-- `agent_kit/mcp.py` 已支持 `web-search` 这种带 `-` 的 server name
-- `agent_kit/skill.py` 已支持 SKILL.md 不显式声明 version(默认 "0.0.0",
-  baizhi 现有 bundled skills 用这个形态)
-- `Runner.workspace_provider`(§ 9.1)+ `ctx.workspace_ephemeral`(§ 5.2)
-  让 baizhi 的 tenant_agent 持久空间能映射进 SDK
+### 切片进度
 
-### 任务清单
+| # | 内容 | 状态 |
+|---|---|---|
+| **A** | baizhi `LlmToolSchema`/`LlmToolCall` alias 到 `agent_kit.ToolSchema`/`ToolCall` | ✅ `c3c0573` |
+| **B** | baizhi `McpHttpToolset` 内部 delegate 到 `agent_kit.McpToolset` + 删 `mcp_session.py` | ✅ `a269bb1` |
+| C | ~~换 baizhi SkillRegistry → FilesystemSkillRegistry~~ — 抽象层级不同,**跳过**(讨论结论:agent_kit.FilesystemSkillRegistry 只是 reader,不接管 baizhi 的多租户 catalog) | ⏭ 不做 |
+| **D** | `LlmAgentRunner` 内部换 `agent_kit.Runner.run_sync()`,RunnerEvent ↔ Event 翻译 | 待办 |
+| 4 篇 recipes | workspace / SRT / MCP / skill-scripts | 待 D 完成 |
 
-1. **真 provider 接通**:
-   - baizhi 现在用什么 provider?(LiteLLM / Anthropic SDK 直连 / 别的?)
-   - 写一个 thin adapter 实现 `agent_kit.LlmProvider` Protocol,
-     **不**进 SDK,放 baizhi-agent 仓库里
-   - 用 `tests/test_baizhi_pptx_websearch_integration.py` 的 scripted 形态
-     作模板,替换成真 provider 跑
+### 已交付的脚手架
 
-2. **真 SkillRegistry 接通**:
-   - baizhi 现在的 skill 持久层在哪?接口跟 `agent_kit.SkillRegistry` 一致吗?
-   - 写一个 baizhi 自家的 `SkillRegistry` 子类(filesystem / db / 别的)
-   - 不进 SDK
+- `agent_kit.contrib.FilesystemSkillRegistry`(`e6411b2`)— baizhi e2e test 在用
+- `agent_kit.Runner.run_sync()`(`319d4c5`)— D 切片的核心 enabler;sync caller
+  一行调用,不用自己写 asyncio bridge
+- `Runner.workspace_provider`(§ 9.1)+ `ctx.workspace_ephemeral`(§ 5.2)—
+  让 baizhi 的 tenant_agent 持久空间映射进 SDK
+- `build_schemas_for_request(request)` per-request 动态 schema hook(§ 5.4)—
+  匹配 baizhi `BaseToolset.build_schemas(request)` 的形态
+- ExceptionGroup unwrap(`87b9dfe`)+ 错误诊断辅助 —— 让 anyio TaskGroup
+  wrap 的错误能看到根因
+- `tests/test_baizhi_pptx_websearch_integration.py`(in-process,确定性,绿)
+- `tests/test_baizhi_e2e_live_pptx_websearch.py`(`@pytest.mark.live`,带
+  transient error retry 和 secrets 加载,**最近一次跑 24.6s 通过**)
+- agent-kit 已 editable install 到 baizhi venv;baizhi pyproject 有
+  `pythonpath = ["src", "../agent-kit"]`(uv 管理 venv + hatchling editable
+  .pth 不兼容的 workaround,看 baizhi commit c3c0573)
 
-3. **真 WebSearch MCP 接通**:
-   - 用 `McpServerConfig(name="web-search", transport=..., url=...)` 接
-     baizhi 的 WebSearch MCP server
-   - SDK 已经支持,只是配置
+### 切片 D 接力(下个 session 开干)
 
-4. **workspace 注入**:
-   - 写 `workspace_provider`(callable)把 baizhi tenant_agent 空间映射成
-     `ctx.workspace`(spec § 9.1 给了示例)
-   - 注意:provider 自己负责 mkdir,SDK 不动
+**目标**:`baizhi.LlmAgentRunner.run(req) -> RunnerResult` 内部不再跑自家
+loop,而是调 `agent_kit.Runner.run_sync(ak_req) -> RunResult`,把结果翻译回
+baizhi 形态。
 
-5. **跑 live e2e**:
-   - 设好 secrets(WebSearch API key 等)
-   - `pytest -m live tests/test_baizhi_e2e_live_pptx_websearch.py`
-   - 产物在 `e2e-output/<filename>.pptx` 验
-   - 跑通 = Stage 5 主要工作完成
+**主要工作量**:
 
-6. **暴露的 SDK gap → 回填**:
-   - 接入过程一定会暴露 spec / API 不足。**记录下来**,回头补 spec § 16 recipes
-     或 SDK 本身。可能候选:
-     - `ctx.emit` 真路由(toolset 进度事件)
-     - `Runner.cancel(run_id)`
-     - SkillRegistry 缺方法 / 形态不对
-     - workspace_provider 边界(per-run 子目录 vs agent 级)
-   - 每个 gap 先讨论再 commit,不要"自然"做了(对照之前 Stage 3 / 4 修订风格)
+1. **5 个 adapter 类**(放在 baizhi 仓库,不进 agent-kit):
+   - baizhi.LlmProvider(sync chat)→ agent_kit.LlmProvider(async chat),
+     用 `asyncio.to_thread` wrap
+   - baizhi.BaseToolset(sync build_schemas(req) + sync execute → str)→
+     agent_kit.BaseToolset(sync build_schemas_for_request + async execute → ToolResult)
+     —— 每个 baizhi toolset(SkillStorageToolset / SkillCatalogToolset /
+     SkillScriptExecToolset / McpHttpToolset)各包一层
+   - baizhi.ChatMessage → agent_kit.Message 翻译
+   - baizhi.LlmResponse → agent_kit.LlmResponse 翻译(token 字段位置不同)
+   - **agent_kit.Event → baizhi.RunnerEvent** 反向翻译(最难一块)—— 18 个
+     event 类型要双向 mapping,emit_event 时序要保留
 
-7. **commit + tag**:
-   ```bash
-   git -C /Users/karama/Documents/baizhi/agent-kit commit -m "Stage 5: baizhi-agent integration + recipes + ..."
-   git -C /Users/karama/Documents/baizhi/agent-kit tag stage-5
-   ```
-   注意:大部分 Stage 5 工作在 **baizhi-agent 仓库**,不是 agent-kit。agent-kit
-   这边主要是 recipes / gap 回填。
+2. **重写 `LlmAgentRunner.run()` 内部**(~50 行):
+   - new agent-kit Runner with adapter-wrapped provider / toolsets
+   - 构造 ak_req 从 baizhi RunnerRequest
+   - `ak_result = runner.run_sync(ak_req)`(`run_sync` 在了!不用自己 bridge)
+   - 把 ak_result.events 翻译回 list[RunnerEvent],返 RunnerResult
+
+3. **保留 baizhi-side 业务规则**:
+   - `SYSTEM_PRELUDE`(包含 honesty rules)→ 塞 Runner.system_prelude
+   - `_looks_like_skill_storage_intent`(LLM 谎称已保存的兜底)→ 改成
+     baizhi 自家 Hook(`after_model` rewrite 或 `before_tool` 强制)
+
+4. **183 个 baizhi tests 逐个 verify**:
+   - 多数会触发新 backend
+   - emit_event 时序、RunnerEvent 形状、`output_file` 写法都是断言点
+   - 改一半 baizhi broken 风险大,**专门 session 做,不混其他**
+
+**spec gap 可能浮出 1-2 个**(对照 Stage 3 / 4 修订风格,先讨论再 commit):
+- `Runner.cancel(run_id)` 外部 cancel(baizhi `cancel_check: Callable`)
+- `ctx.emit` 真路由(baizhi live sink)
+- 别的
 
 ### Stage 5 退出标准(对照 tech-design § 14 修订)
 
@@ -159,7 +168,7 @@ stream 真要时再做)。
 | baizhi-agent pytest 不退化 | 在 baizhi-agent 仓库跑 |
 | pptx e2e live test 跑通 | `pytest -m live tests/test_baizhi_e2e_live_pptx_websearch.py` 绿 + e2e-output/ 有有效 pptx |
 | recipes 写齐 4 篇(workspace / SRT / MCP / skill-scripts) | `docs/recipes/` 4 个文件 |
-| 200+ tests 全绿(估算)| `.venv/bin/python -m pytest` |
+| 250+ tests 全绿(估算)| `.venv/bin/python -m pytest`(目前 237 + 1 skipped) |
 
 ---
 
@@ -246,12 +255,29 @@ baizhi-agent 项目有 CODEX.md 约定 Claude × Codex 协作;agent-kit 目前**
 - `4ecd089` tag `stage-4` — **McpToolset 真实现(3 transports + ${VAR} + idempotent connect/aclose)+ Runner pre-warm + 33 tests = 190 total**
 
 ### Stage 4 后续(sandbox 决议 + workspace_provider)
-- `32765a2` **Runner.workspace_provider + § 16 不内置 sandbox 决议 + 5 tests**(讨论历史:对比 ADK BaseCodeExecutor / openai-agents BaseSandboxSession,三场景都有外部解 → SDK 不内置)
+- `32765a2` **Runner.workspace_provider + § 16 不内置 sandbox 决议 + 5 tests**(讨论:对比 ADK BaseCodeExecutor / openai-agents BaseSandboxSession,三场景都有外部解 → SDK 不内置)
 - `1410c50` **MCP/SKILL.md 名规则放宽 + baizhi pptx + websearch e2e 脚手架**(包含 in-process integration test + opt-in live test);**197 total**
+- `792f376` **stream 推迟到 Stage 7+;路线图重排,Stage 5 = baizhi 接入**
 
 ### Stage 5 (新) = baizhi-agent 接入(进行中)
 
-工作大部分在 baizhi-agent 仓库,不在 agent-kit。详见上面"Stage 5 接力"。
+agent-kit 这边的 enabler 工作:
+
+- `e6411b2` **`agent_kit.contrib.FilesystemSkillRegistry`**(reference 文件系统 skill 持久层,20 tests)
+- `87b9dfe` **ExceptionGroup unwrap 错误诊断辅助**(`agent_kit/_errors.py`,6 tests)
+- `2fccbdb` **live e2e transient error retry**(macOS EADDRNOTAVAIL 不稳定的兜底)
+- `e550020` **spec § 5.4 决议**:per-request schema hook(让 toolset 按 request 过滤/动态生成 schemas)
+- `4ac1fca` **`build_schemas_for_request` + Router per-run 重建**(10 tests)
+- `319d4c5` **`Runner.run_sync()`**(openai-agents 形态;sync wrapper,FastAPI 里别用;4 tests)
+- **237 total + 1 skipped(live)** —— live e2e 最近一次 24.6s 通过
+
+切片 D 在 baizhi-agent 仓库做(下个 session 起)。
+
+### baizhi-agent 仓库的 Stage 5 进度(commit 在 baizhi 那边)
+
+- `c3c0573` 切片 A — `LlmToolSchema` / `LlmToolCall` alias 到 `agent_kit.ToolCall` / `ToolSchema`
+- `a269bb1` 切片 B — `McpHttpToolset` 内部 delegate 到 `agent_kit.McpToolset` + 删 `mcp_session.py`(144 行死代码)+ 重写 7 toolset tests
+- baizhi 测试:183 → 183(0 退化)
 
 ### ~~Stage 5 (原)~~ stream 实现
 **推迟到 Stage 7+**。理由 + 决策见 spec § 14 修订 2026-05-24。
@@ -263,7 +289,7 @@ baizhi-agent 项目有 CODEX.md 约定 Claude × Codex 协作;agent-kit 目前**
 ```bash
 cd /Users/karama/Documents/baizhi/agent-kit
 .venv/bin/python -m pytest 2>&1 | tail -5
-# Expected: 197 passed, 1 skipped in <1s
+# Expected: 237 passed, 1 skipped in <1s
 
 # 看现状
 cat HANDOFF.md
@@ -277,4 +303,4 @@ git -C /Users/karama/Documents/baizhi/agent-kit log --oneline --decorate | head
 
 ---
 
-最后更新:2026-05-24,Stage 4 后续 + 路线图重排后。
+最后更新:2026-05-24,Stage 5 切片 A+B 落地 + run_sync / per-request schema hook / contrib.FilesystemSkillRegistry / ExceptionGroup unwrap 落地 + 路线图重排后。
