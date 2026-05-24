@@ -195,9 +195,12 @@ EventKind = Literal[
 | `error` | `{exc_type, message, traceback, stage}` | 任意异常,run 终止前 emit 一次 |
 | `cancelled` | `{round: int, reason: str?}` | cancel event 触发,run 终止前 emit 一次 |
 | `context_compacted` | `{before_count, after_count, before_tokens, after_tokens, strategy: str}` | compactor 触发后、provider.chat 调用前 |
+| `llm_short_circuited` | `{by_hook: str, response: dict}` | `before_model` hook 返回非 None → 替代 provider.chat 调用 |
+| `tool_short_circuited` | `{by_hook: str, call: dict, result: dict}` | `before_tool` hook 返回非 None → 替代 tool 实调 |
 
-`stage` ∈ `{"loop", "provider", "tool", "setup", "compactor"}` —— 异常发生在哪个阶段。
+`stage` ∈ `{"loop", "provider", "tool", "setup", "compactor", "hook"}` —— 异常发生在哪个阶段。
 `strategy` 由 compactor 实现自填,推荐值:`"truncate"` / `"summarize"` / `"sliding_window"` / `"<custom>"`。
+`by_hook` 由 loop 填入造成短路的 Hook 子类名(便于 trace UI 区分哪个 hook 介入了)。
 
 ### 3.6 Event
 
@@ -678,7 +681,94 @@ else:
 
 **stream 模式下 `llm_response` 仍 emit** —— 下游持久化逻辑不分叉。
 
-### 8.6 Context compaction(防 context window 爆炸)
+### 8.6 Hooks(切面 + 决策注入)
+
+**问题**:使用方常需要在 LLM / tool 调用前后插一脚 —— 权限检查、PII 脱敏、
+预算控制、童锁、mock 测试、内容 validate 等。这些是**横切关注点**(跨多
+provider / toolset 统一应用),用装饰器逐个包很啰嗦。
+
+**设计**:1 个 `Hook` 基类 + 4 个 no-op 默认方法。
+
+```python
+class Hook:
+    async def before_model(self, ctx, messages, tools) -> LlmResponse | None: ...
+    async def after_model(self, ctx, response) -> LlmResponse | None: ...
+    async def before_tool(self, ctx, call) -> ToolResult | None: ...
+    async def after_tool(self, ctx, call, result) -> ToolResult | None: ...
+```
+
+注册:`AgentLoop(..., hooks=[HookA(), HookB()])` 或 `Runner(..., hooks=[...])`。
+
+**短路语义**(对 4 方法一致):
+- 按注册顺序遍历 hook list
+- 第一个返回非 None 的 hook **短路**:用其返回值替代正常路径,后续同名 hook 跳过
+- 全 None 则正常进 provider.chat / toolset.execute
+
+**Loop 集成位置**(扩展 § 2 的 sequence):
+
+```
+每轮:
+  for hook in hooks:
+      r = await hook.before_model(ctx, messages, tools)
+      if r is not None: response = r; break
+  else:
+      response = await provider.chat(messages, tools)
+      yield Event(llm_response, ...)
+  
+  if short-circuited:
+      yield Event(llm_short_circuited, {by_hook: "<class>", response: ...})
+  
+  for hook in hooks:
+      r = await hook.after_model(ctx, response)
+      if r is not None: response = r; break
+  
+  if not response.tool_calls: yield final_text; return
+  
+  for call in response.tool_calls:
+      yield Event(tool_call, ...)
+      for hook in hooks:
+          r = await hook.before_tool(ctx, call)
+          if r is not None: result = r; break
+      else:
+          result = await router.execute(call, ctx)
+      
+      if short-circuited:
+          yield Event(tool_short_circuited, {by_hook, call, result})
+      
+      for hook in hooks:
+          r = await hook.after_tool(ctx, call, result)
+          if r is not None: result = r; break
+      
+      yield Event(tool_result, ...)
+      messages.append(result.to_tool_message())
+```
+
+**异常**:hook raise → loop catch → emit `Event(kind="error", stage="hook",
+payload={hook_class, method, exc_type, message, traceback})` → return。
+**不 swallow**(对齐 ADK,反对 baizhi-agent / fam-runtime 的 swallow)。
+
+**关于"为什么没有 before_round / after_round"**:
+agent-kit 的 round = "一次 LLM call + 0 个或多个 tool calls"。
+- before_model 就是 before_round 的语义(每轮 LLM 调用前一次)
+- after_model 是 LLM 返回后、tool dispatch 前(信号还没收齐 —— 不够 "after round")
+- "真正的 after_round"(LLM 返回 + 所有 tool 跑完后看全局)曾经考虑过,被砍 ——
+  详见 proposal.md § 八的迭代,或本次决策的 commit message
+
+### 装饰器 vs hook 选择指南
+
+| 关注点 | 推荐 | 理由 |
+|---|---|---|
+| **跨多 toolset / provider 统一规则**(权限 / quota / 童锁) | **hook** | hook 天然横切;装饰器要每个 wrap 一遍 |
+| **单一 toolset 内聚的关注点**(GitHub MCP 重试 / 降级) | **装饰器**(`class RetryingMcpToolset(McpToolset)`) | 内聚 + 装饰器实例自带状态空间 |
+| **单一 provider 内聚的关注点**(cost tracking / token rate limit) | **装饰器**(`class BillingProvider(LlmProvider)`) | 拿到 raw response 信息更全;每个 run new 一个就无 state 泄露 |
+| **复杂跨轮状态机**(收集 N 轮再综合判断) | **wrap `runner.run`**(caller 自己外层循环) | SDK 单 run 是原子单元;跨 run 的逻辑在 caller 控制流 |
+| **per-tool PII 脱敏** | 装饰器(scope 清晰) | 装饰器 → 该 toolset 才 redact;hook → 所有 tool 都过一遍 |
+| **per-LLM PII 脱敏** | 装饰器(同上) | 同理 |
+| **mock 测试**(替换 tool 行为) | hook(`before_tool` 短路) | 测试代码用 hook 比 monkey-patch toolset 简洁 |
+
+**口诀**:**横切上 hook,内聚上装饰器,跨轮状态机往 caller 外推**。
+
+### 8.7 Context compaction(防 context window 爆炸)
 
 **问题**:多轮 loop 累积 messages,大 tool 输出(file read / web fetch /
 mcp payload)很快可以打爆 context window。baizhi-agent / fam-runtime 都没
@@ -973,9 +1063,15 @@ mcp 大 payload)。零 LLM 成本,覆盖 80% 场景。
 - `tests/test_context.py` —— safe_split_messages 全部 ADK 边界、
   _assert_tool_pairs_intact 校验、TruncatingCompactor 行为
   (token_budget 触发 / keep_recent 保留 / placeholder 替换不影响配对)
+- `tests/test_hooks.py` —— Hook 基类 4 方法 no-op、注册顺序遍历、
+  first-non-None 短路 + 后续 hook 跳过、4 个 method 各自的短路点 emit
+  对应 short_circuited event、hook 抛异常 emit
+  `Event(error, stage="hook")` 含 hook_class / method 元数据
 - `tests/test_loop.py` —— FakeProvider 脚本化 response,验证 event 顺序、
   终止条件、cancel、**compactor 集成**(`context_compacted` event 顺序、
-  兜底校验失败时 emit error event with `stage="compactor"`)
+  兜底校验失败时 emit error event with `stage="compactor"`)、
+  **hook 集成**(4 个 hook 调用顺序、短路 emit short_circuited event、
+  hook 异常 emit error event)
 - `tests/test_runner.py` —— run vs run_to_completion 行为差异、资源清理
 
 ### 12.2 集成测试
@@ -1013,8 +1109,8 @@ mcp 大 payload)。零 LLM 成本,覆盖 80% 场景。
 | Stage | 内容 | 退出标准 |
 |---|---|---|
 | **0** | 仓库骨架 + 设计文档 ✓ | 模块 stub 可 import ✓ |
-| **1** | types / provider / toolset / skill / **tokens / context(含 TruncatingCompactor + safe_split)** 实现 + 单元测试 | 35+ 单测全绿,context 模块单测覆盖 ADK safe_split 全部边界 |
-| **2** | loop 实现(非 stream + cancel + max_rounds + **compactor 集成 + 兜底校验**) + 集成测试 | FakeProvider 跑通 flashidea;TruncatingCompactor 触发后 `context_compacted` event emit |
+| **1** | types / provider / toolset / skill / **tokens / context(含 TruncatingCompactor + safe_split) / hooks(Hook 基类 + 4 no-op)** 实现 + 单元测试 | 40+ 单测全绿,context 模块单测覆盖 ADK safe_split 全部边界,hooks 模块单测覆盖 4 个 method 签名 |
+| **2** | loop 实现(非 stream + cancel + max_rounds + **compactor 集成 + 兜底校验 + 4 个 hook 调用 + first-non-None 短路 + short_circuited event**) + 集成测试 | FakeProvider 跑通 flashidea;TruncatingCompactor 触发后 `context_compacted` event emit;hook 短路触发后对应 short_circuited event emit;hook 异常被 catch + 转 error event |
 | **3** | runner 实现(run + run_to_completion + 资源生命周期) + 端到端测试 | RunResult 行为符合契约 |
 | **4** | mcp 实现(lazy connect + aclose,wrap `mcp` SDK) + 真打测试 | 真打 DashScope WebSearch OK,4 种使用方 lifecycle 用例(per-call / per-run / per-tenant / global)各跑一次 |
 | **5** | stream 实现(Q1 决议) + provider.chat_stream 接 LiteLLM 等 | stream/non-stream 切换不破坏 |
@@ -1063,6 +1159,11 @@ Stage 重做;baizhi-agent / fam-runtime 在 Stage 6/7 之前完全不受影响�
 | **Context compaction:ContextCompactor Protocol + microcompact 默认实现** | OpenHarness `microcompact_messages` |
 | **Safe split 兜底(保护 tool_call/tool_result 配对)** | ADK `_safe_token_compaction_split_index` |
 | **Token 估算:chars/4 × 4/3,优先 API usage** | OpenHarness `token_estimation` + ADK `_latest_prompt_token_count` |
+| **Hook 基类 + 4 no-op 方法(before/after × model/tool)** | ADK `LlmAgent` callback 字段 + plugin 系统的合并精简版 |
+| **First-non-None 短路语义** | ADK `base_llm_flow.py` + `base_agent.py` + `functions.py` |
+| **Hook 异常 raise → error event,不 swallow** | ADK plugins(反对 baizhi-agent / fam-runtime 的 swallow)|
+| **`llm_short_circuited` / `tool_short_circuited` event 透明性** | 原创(给 trace UI 区分 hook 介入)|
+| **装饰器 vs hook 选择指南**(横切 hook / 内聚装饰器 / 跨轮往外推) | 原创(基于 user-driven 收敛)|
 | ToolCallContext 统一合同 | ADK Tool.run_async + baizhi-agent toolsets.py |
 | 命名冲突启动期检测 | baizhi-agent LlmAgentRunner |
 | 不引 google.genai / langchain | GOALS.md Non-goals |

@@ -35,6 +35,8 @@ from __future__ import annotations
 
 from typing import AsyncIterator
 
+from .context import ContextCompactor
+from .hooks import Hook
 from .loop import RunRequest
 from .provider import LlmProvider
 from .toolset import BaseToolset
@@ -51,11 +53,15 @@ class Runner:
         *,
         default_max_rounds: int = 10,
         system_prelude: str = "",
+        compactor: ContextCompactor | None = None,
+        hooks: list[Hook] | None = None,
     ) -> None:
         self._provider = provider
         self._toolsets = list(toolsets)
         self._default_max_rounds = default_max_rounds
         self._prelude = system_prelude
+        self._compactor = compactor
+        self._hooks = list(hooks or ())
 
     async def run(self, request: RunRequest) -> AsyncIterator[Event]:
         """事件流形式。异常全部 catch,wrap 成 Event(kind="error") + return。

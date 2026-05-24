@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from typing import Any, AsyncIterator
 
 from .context import ContextCompactor
+from .hooks import Hook
 from .provider import LlmProvider
 from .toolset import BaseToolset, ToolCallContext, ToolsetRouter
 from .types import Event
@@ -47,12 +48,14 @@ class AgentLoop:
         default_max_rounds: int = 10,
         system_prelude: str = "",
         compactor: ContextCompactor | None = None,    # None == 不 compact
+        hooks: list[Hook] | None = None,              # 按注册顺序调用;空 == 无 hook
     ) -> None:
         self._provider = provider
         self._router = ToolsetRouter(toolsets)
         self._default_max_rounds = default_max_rounds
         self._prelude = system_prelude
         self._compactor = compactor
+        self._hooks = list(hooks or ())
 
     async def run(
         self,

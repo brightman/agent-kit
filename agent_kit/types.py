@@ -17,15 +17,17 @@ Role = Literal["system", "user", "assistant", "tool"]
 EventKind = Literal[
     "round_start",
     "llm_request",
-    "llm_delta",          # Q1 stream 决议,仅 stream 模式下出现
+    "llm_delta",                # Q1 stream 决议,仅 stream 模式下出现
     "llm_response",
+    "llm_short_circuited",      # before_model hook 短路 → 替代 llm_response 之前的 LLM 实调
     "tool_call",
     "tool_result",
+    "tool_short_circuited",     # before_tool hook 短路 → 替代 tool 实调
     "round_end",
     "final_text",
     "error",
     "cancelled",
-    "context_compacted",  # 上下文 compact 触发后 emit;payload 见 tech-design § 3.5
+    "context_compacted",        # 上下文 compact 触发后 emit;payload 见 tech-design § 3.5
 ]
 
 
