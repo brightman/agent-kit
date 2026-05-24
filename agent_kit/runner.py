@@ -39,6 +39,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import shutil
 import time
 import traceback
@@ -175,6 +176,9 @@ class Runner:
             # --- setup ---
             try:
                 workspace.mkdir(parents=True, exist_ok=True)
+                # spec § 7.5.1:对任何带 async `connect()` 的 toolset 做 pre-warm,
+                # 让 ToolsetRouter 后续 sync build_schemas 拿到缓存
+                await self._prewarm_toolsets()
                 composed_prelude = await self._compose_prelude(request)
                 loop = AgentLoop(
                     self._provider,
@@ -251,6 +255,19 @@ class Runner:
         )
 
     # ---- helpers ----
+
+    async def _prewarm_toolsets(self) -> None:
+        """spec § 7.5.1:对任何带 async `connect()` 的 toolset 调用一次。
+
+        McpToolset 是首要场景(connect() 必须在 Router 的 build_schemas 之前
+        完成,否则 RuntimeError);其他 toolset 自定义 connect 也会被识别。
+        connect() 应当是 idempotent —— 已连接者不重连。
+        """
+        for ts in self._toolsets:
+            connect = getattr(ts, "connect", None)
+            if connect is None or not inspect.iscoroutinefunction(connect):
+                continue
+            await connect()
 
     async def _compose_prelude(self, request: RunRequest) -> str:
         """spec § 10:Runner.prelude + skill catalog + RunRequest.prelude。"""

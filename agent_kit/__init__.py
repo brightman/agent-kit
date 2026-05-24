@@ -10,6 +10,7 @@ __version__ = "0.0.0"
 from .context import ContextCompactor, TruncatingCompactor
 from .hooks import Hook
 from .loop import AgentLoop, RunRequest
+from .mcp import McpServerConfig, McpToolset, toolsets_from_configs
 from .provider import LlmDelta, LlmProvider, LlmResponse, ToolSchema
 from .runner import Runner, RunResult
 from .skill import (
@@ -52,6 +53,10 @@ __all__ = [
     "ContextCompactor",
     "TruncatingCompactor",
     "Hook",
+    # mcp
+    "McpServerConfig",
+    "McpToolset",
+    "toolsets_from_configs",
     # loop + runner
     "AgentLoop",
     "RunRequest",
