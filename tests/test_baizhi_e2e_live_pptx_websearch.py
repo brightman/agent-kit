@@ -20,24 +20,19 @@ from typing import Any
 
 import pytest
 
+from agent_kit.contrib.skills import FilesystemSkillRegistry
 from agent_kit.loop import RunRequest
 from agent_kit.mcp import McpServerConfig, McpToolset
 from agent_kit.provider import LlmResponse, ToolSchema
 from agent_kit.runner import Runner
-from agent_kit.skill import (
-    Skill,
-    SkillCatalogToolset,
-    SkillFrontmatter,
-    SkillRegistry,
-    parse_frontmatter,
-)
+from agent_kit.skill import SkillCatalogToolset
 from agent_kit.toolset import BaseToolset, ToolCallContext
 from agent_kit.types import Message, ToolCall, ToolResult
 
 
 BAIZHI_AGENT_ROOT = Path(__file__).resolve().parents[2] / "baizhi-agent"
 BAIZHI_ENV_FILE = BAIZHI_AGENT_ROOT / ".baizhi-agent" / "config" / ".env"
-PPTX_SKILL_ROOT = BAIZHI_AGENT_ROOT / "bundled_skills" / "pptx"
+BUNDLED_SKILLS_ROOT = BAIZHI_AGENT_ROOT / "bundled_skills"
 WEBSEARCH_URL = "https://dashscope.aliyuncs.com/api/v1/mcps/WebSearch/mcp"
 TASK = "深度搜索anthropic 关于AI Native orgnization组织方式的材料，生成一份可以分享的ppt"
 
@@ -51,41 +46,6 @@ def _load_env_file(path: Path) -> None:
             continue
         key, value = line.split("=", 1)
         os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
-
-
-class _DirectorySkillRegistry(SkillRegistry):
-    def __init__(self, skill_root: Path) -> None:
-        self._skill_root = skill_root
-        md = (skill_root / "SKILL.md").read_text(encoding="utf-8")
-        self._frontmatter, self._body = parse_frontmatter(md)
-
-    async def list(self, tenant_id: str) -> list[SkillFrontmatter]:
-        return [self._frontmatter]
-
-    async def load(
-        self, tenant_id: str, name: str, version: str | None = None
-    ) -> Skill:
-        if name != self._frontmatter.name:
-            raise KeyError(name)
-        files: dict[str, bytes] = {}
-        for path in self._skill_root.rglob("*"):
-            if path.is_file() and path.name != "SKILL.md":
-                files[str(path.relative_to(self._skill_root))] = path.read_bytes()
-        return Skill(
-            name=self._frontmatter.name,
-            frontmatter=self._frontmatter,
-            body=self._body,
-            files=files,
-            storage_root=Path("/tmp/agent-kit-test-skills") / self._frontmatter.name,
-        )
-
-    async def save_draft(
-        self, tenant_id: str, name: str, md: str, files: dict[str, bytes]
-    ) -> None:
-        raise NotImplementedError
-
-    async def publish(self, tenant_id: str, name: str) -> str:
-        raise NotImplementedError
 
 
 @dataclass
@@ -387,7 +347,8 @@ async def test_live_llm_websearch_and_pptx_artifact(tmp_path: Path) -> None:
         max_tokens=int(os.environ.get("MINIMAX_MAX_TOKENS", "4096")),
     )
     skill_catalog = SkillCatalogToolset(
-        _DirectorySkillRegistry(PPTX_SKILL_ROOT), tenant_id="tenant-baizhi-e2e"
+        FilesystemSkillRegistry(BUNDLED_SKILLS_ROOT),
+        tenant_id="tenant-baizhi-e2e",
     )
     websearch = McpToolset(
         McpServerConfig(

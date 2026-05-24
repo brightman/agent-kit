@@ -20,59 +20,19 @@ import pytest
 from mcp.server.fastmcp import FastMCP
 from mcp.shared.memory import create_client_server_memory_streams
 
+from agent_kit.contrib.skills import FilesystemSkillRegistry
 from agent_kit.loop import RunRequest
 from agent_kit.mcp import McpServerConfig, McpToolset
 from agent_kit.provider import LlmResponse, ToolSchema
 from agent_kit.runner import Runner
-from agent_kit.skill import (
-    Skill,
-    SkillCatalogToolset,
-    SkillFrontmatter,
-    SkillRegistry,
-    parse_frontmatter,
-)
+from agent_kit.skill import SkillCatalogToolset
 from agent_kit.types import Message, ToolCall
 
 
 BAIZHI_AGENT_ROOT = Path(__file__).resolve().parents[2] / "baizhi-agent"
-PPTX_SKILL_ROOT = BAIZHI_AGENT_ROOT / "bundled_skills" / "pptx"
+BUNDLED_SKILLS_ROOT = BAIZHI_AGENT_ROOT / "bundled_skills"
 WEBSEARCH_URL = "https://dashscope.aliyuncs.com/api/v1/mcps/WebSearch/mcp"
 TASK = "深度搜索anthropic 关于AI Native orgnization组织方式的材料，生成一份可以分享的ppt"
-
-
-class _DirectorySkillRegistry(SkillRegistry):
-    def __init__(self, skill_root: Path) -> None:
-        self._skill_root = skill_root
-        md = (skill_root / "SKILL.md").read_text(encoding="utf-8")
-        self._frontmatter, self._body = parse_frontmatter(md)
-
-    async def list(self, tenant_id: str) -> list[SkillFrontmatter]:
-        return [self._frontmatter]
-
-    async def load(
-        self, tenant_id: str, name: str, version: str | None = None
-    ) -> Skill:
-        if name != self._frontmatter.name:
-            raise KeyError(name)
-        files: dict[str, bytes] = {}
-        for path in self._skill_root.rglob("*"):
-            if path.is_file() and path.name != "SKILL.md":
-                files[str(path.relative_to(self._skill_root))] = path.read_bytes()
-        return Skill(
-            name=self._frontmatter.name,
-            frontmatter=self._frontmatter,
-            body=self._body,
-            files=files,
-            storage_root=Path("/tmp/agent-kit-test-skills") / self._frontmatter.name,
-        )
-
-    async def save_draft(
-        self, tenant_id: str, name: str, md: str, files: dict[str, bytes]
-    ) -> None:
-        raise NotImplementedError
-
-    async def publish(self, tenant_id: str, name: str) -> str:
-        raise NotImplementedError
 
 
 class _InMemoryMcpToolset(McpToolset):
@@ -205,7 +165,7 @@ async def test_agent_loop_uses_baizhi_pptx_skill_and_websearch_mcp(
 ) -> None:
     provider = _DeckProvider()
     skill_catalog = SkillCatalogToolset(
-        _DirectorySkillRegistry(PPTX_SKILL_ROOT), tenant_id="tenant-baizhi"
+        FilesystemSkillRegistry(BUNDLED_SKILLS_ROOT), tenant_id="tenant-baizhi"
     )
     websearch = _InMemoryMcpToolset(
         _make_websearch_server(),
