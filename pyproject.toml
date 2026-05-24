@@ -3,14 +3,14 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "baizhi-sdk"
+name = "agent-kit"
 version = "0.0.0"
-description = "Minimal agent loop + skill + MCP SDK"
+description = "Minimal agent loop + skill + MCP toolkit"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "Apache-2.0" }
 authors = [
-    { name = "baizhi-sdk contributors" },
+    { name = "agent-kit contributors" },
 ]
 dependencies = [
     # MCP: 直接依赖 Anthropic 官方 SDK,与 baizhi-agent PR f6 对齐
@@ -30,7 +30,7 @@ dev = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["baizhi_sdk"]
+packages = ["agent_kit"]
 
 [tool.ruff]
 line-length = 100

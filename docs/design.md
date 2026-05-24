@@ -1,4 +1,4 @@
-# baizhi-sdk · Minimal Agent Loop + Skill + MCP SDK 设计
+# agent-kit · Minimal Agent Loop + Skill + MCP 设计
 
 **版本**:Stage 0(2026-05-24)  
 **状态**:仓库骨架已出,模块 stub 占位;真实现等首次接进 baizhi-agent 时再补  
@@ -17,7 +17,8 @@
 - SKILL.md frontmatter + progressive disclosure
 - 每 skill 独立 storage 根目录
 
-把这层公共骨架抽成独立 SDK,后续两个项目共用,新项目零成本起步。
+把这层公共骨架抽成独立 kit(`agent-kit`,自报"骨架而非全家桶"),后续两个
+项目共用,新项目零成本起步。
 
 ---
 
@@ -36,7 +37,7 @@
 ## 三、模块划分
 
 ```
-baizhi_sdk/
+agent_kit/
   __init__.py     # 顶层 re-export
   types.py        # Message / ToolCall / ToolResult / Event(纯数据)
   provider.py     # LlmProvider Protocol + ToolSchema / LlmResponse / LlmDelta

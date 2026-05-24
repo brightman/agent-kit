@@ -1,6 +1,6 @@
-"""baizhi-sdk: minimal agent loop + skill + MCP SDK.
+"""agent-kit: minimal agent loop + skill + MCP toolkit.
 
-公开接口固定在本模块导出;子模块视为 SDK 内部组织,不保证稳定性。
+公开接口固定在本模块导出;子模块视为内部组织,不保证稳定性。
 """
 
 from __future__ import annotations

@@ -1,6 +1,6 @@
-# baizhi-sdk
+# agent-kit
 
-Minimal, framework-agnostic SDK for building agent runtimes around:
+Minimal, framework-agnostic Python toolkit for building agent runtimes around:
 
 - **Agent loop** — bounded multi-round LLM ↔ tool conversation
 - **Skill** — SKILL.md-defined capability with progressive disclosure
@@ -10,12 +10,13 @@ Minimal, framework-agnostic SDK for building agent runtimes around:
 
 `baizhi-agent`、`fam-runtime` 各自实现了一份 agent loop + skill + MCP
 脚手架,但 90% 的轮廓重叠(provider 抽象、轮数 cap、tool dispatch、
-mcp__<server>__<tool> 命名、SKILL.md frontmatter、progressive disclosure)。
-本仓库把这层公共骨架抽出来,作为独立可复用的 Python SDK。
+`mcp__<server>__<tool>` 命名、SKILL.md frontmatter、progressive disclosure)。
+本仓库把这层公共骨架抽出来,作为独立可复用的 Python 工具包(kit,而非全家桶
+SDK)—— 只提供骨架,不绑定上层业务。
 
 ## Non-goals
 
-按 [GOALS.md](../baizhi-agent/GOALS.md) Non-goals 对齐,SDK **不**做:
+按 [GOALS.md](../baizhi-agent/GOALS.md) Non-goals 对齐,本 kit **不**做:
 
 - 多租户队列 / 资源调度
 - 持久化 / SQLite / 数据库
@@ -24,7 +25,7 @@ mcp__<server>__<tool> 命名、SKILL.md frontmatter、progressive disclosure)。
 - 鉴权 / 配额
 - LangChain / google.genai 等重依赖
 
-这些都是 **使用方** 的事(baizhi-agent / fam-runtime 等);SDK 只暴露
+这些都是 **使用方** 的事(baizhi-agent / fam-runtime 等);agent-kit 只暴露
 `Runner.run(request) -> AsyncIterator[Event]`,使用方在外面包队列、写
 持久化、起 HTTP server。
 
@@ -38,7 +39,7 @@ mcp__<server>__<tool> 命名、SKILL.md frontmatter、progressive disclosure)。
 完整设计见 [docs/design.md](docs/design.md)。模块划分:
 
 ```
-baizhi_sdk/
+agent_kit/
   types.py     # Message / ToolCall / ToolResult / Event
   provider.py  # LlmProvider Protocol
   toolset.py   # BaseToolset ABC + ToolCallContext
