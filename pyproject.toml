@@ -1,0 +1,41 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "baizhi-sdk"
+version = "0.0.0"
+description = "Minimal agent loop + skill + MCP SDK"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [
+    { name = "baizhi-sdk contributors" },
+]
+dependencies = [
+    # MCP: 直接依赖 Anthropic 官方 SDK,与 baizhi-agent PR f6 对齐
+    "mcp>=1.0",
+    # SKILL.md frontmatter 解析
+    "pyyaml>=6.0",
+    "pydantic>=2.0",
+]
+
+[project.optional-dependencies]
+litellm = ["litellm>=1.40"]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.5",
+    "mypy>=1.10",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["baizhi_sdk"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
