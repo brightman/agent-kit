@@ -330,7 +330,26 @@ class BaseToolset(ABC):
 
     @abstractmethod
     def build_schemas(self) -> list[ToolSchema]:
-        """SHOULD 在每次调用返回同样的 list(允许动态变化但不推荐)。"""
+        """静态 schema 列表。无 request 上下文场景下被调(例如 caller 自己
+        建 Router 而不经 AgentLoop;或 build_schemas_for_request 的默认实现)。"""
+
+    def build_schemas_for_request(
+        self, request: "RunRequest"
+    ) -> list[ToolSchema]:
+        """**per-run 动态 schema**(2026-05-24 Stage 5 修订,详见 § 5.4)。
+
+        默认实现:`return self.build_schemas()`(静态 toolset 无需 override)。
+
+        想 per-run 过滤 / 动态生成的 toolset(例如 baizhi SkillToolsetCatalog
+        按 `request.skills` 暴露 skill_* 工具;`FilteredMcpToolset` 按 allow-list
+        砍 MCP 工具)override 这个方法。
+
+        Router 在每次 `AgentLoop.run()` 入口调它,所以:
+        - schemas 缓存可以放在 toolset(常 case),也可以每次按 request 重新算
+        - 同一个 toolset 实例跨多个 run **可以**返回不同 schemas
+        - 命名冲突检测每个 run 重做(便宜)
+        """
+        return self.build_schemas()
 
     @abstractmethod
     async def execute(self, call: ToolCall, ctx: ToolCallContext) -> ToolResult:
@@ -367,13 +386,26 @@ class ToolCallContext:
 
 ```python
 class ToolsetRouter:
-    def __init__(self, toolsets: list[BaseToolset]) -> None:
+    def __init__(
+        self,
+        toolsets: list[BaseToolset],
+        *,
+        request: "RunRequest | None" = None,
+    ) -> None:
         """启动期检测:
         1. 各 toolset.name 唯一(否则 raise ValueError)
-        2. 跨 toolset 的 ToolSchema.name 无冲突(否则 raise ValueError)"""
+        2. 跨 toolset 的 ToolSchema.name 无冲突(否则 raise ValueError)
+
+        `request`:Stage 5 修订(§ 5.4)。
+        - None(默认)= 调 `toolset.build_schemas()` 静态绑定。
+          兼容 caller 自己建 Router 而不经过 AgentLoop 的场景。
+        - RunRequest = 调 `toolset.build_schemas_for_request(request)`,
+          支持 toolset 按 request 过滤 / 动态生成 schemas。AgentLoop 每个
+          run 用这条路径。
+        """
 
     def all_schemas(self) -> list[ToolSchema]:
-        """合并所有 toolset 的 schema。顺序:registration order。"""
+        """合并所有 toolset 的 schema(已按 init 时的 request 模式确定)。"""
 
     async def execute(self, call: ToolCall, ctx: ToolCallContext) -> ToolResult:
         """根据 call.name 路由。
@@ -383,6 +415,60 @@ class ToolsetRouter:
     async def aclose(self) -> None:
         """按 reverse(registration order)调用各 toolset.aclose,异常 swallow + log。"""
 ```
+
+### 5.4 静态 vs per-run schema 决议(Stage 5 修订 2026-05-24)
+
+**问题**:`SkillCatalogToolset` 想"只暴露 enabled_skills 对应的 skill_* 工具",
+`McpToolset` 在 multi-tenant 场景想按 allow-list 过滤可见的远程工具 ——
+都需要 toolset 在 build_schemas 时**看到 request**。原 spec `build_schemas()`
+无参,做不到。
+
+**对比方案**:
+
+| 方案 | 描述 | 否决理由 |
+|---|---|---|
+| 完全静态(现状) | `build_schemas()` 一次绑定 | baizhi/multi-tenant 场景做不到 |
+| 完全动态 | `build_schemas(request)` 必接 request | MCP / 其他静态 toolset 被迫接无用参数;`build_schemas()` 那条"推荐返回同样 list"指引失去意义 |
+| `toolsets_provider: Callable[[req], list]` | Runner 接 callable,per-run new toolsets 列表 | MCP toolset connect 成本高,per-run new 不可接受;复杂度转嫁使用方 |
+| **C(本节决议)**:双方法 opt-in 动态 | 加 `build_schemas_for_request(request)` 默认 delegate 到静态 | **采用** —— 静态不动,动态 opt-in |
+
+**采用方案 C**:
+
+- 新增 `BaseToolset.build_schemas_for_request(request) -> list[ToolSchema]`,
+  默认 `return self.build_schemas()`
+- `ToolsetRouter.__init__` 加 `request: RunRequest | None = None`;给了就走
+  per-request 路径
+- **AgentLoop 每个 `run()` 入口重建 Router**(Router 从 `__init__` 移到 `run()`
+  开头),所以同一个 AgentLoop 实例跨多 run 可以拿到不同的 tool 集合
+- toolset 实例本身 **不**被 SDK new-per-run —— 还是 caller 一次性给定;
+  per-run 变化的是它 advertise 的 schemas
+- 命名冲突检测每个 run 重做(toolsets × schemas 数量级,便宜)
+- `AgentLoop.aclose()` 改为直接 walk `self._toolsets` 反序关闭(原本委托给
+  router.aclose,因为 router 是 per-run 的,它不再合适持有 close 责任)
+
+**支持的过滤模式**(by example,SDK 不内置):
+
+```python
+# baizhi: SkillCatalogToolset 按 request.enabled_skills 暴露 skill_* 工具
+class SkillToolsetCatalog(BaseToolset):
+    def build_schemas(self) -> list[ToolSchema]:
+        return []   # 没 request 时退化为空(或者全集 — 实现选择)
+    def build_schemas_for_request(self, request) -> list[ToolSchema]:
+        return [self._make_skill_tool_schema(s) for s in request.enabled_skills]
+
+# 多租户:按租户 allow-list 过滤 MCP 工具
+class FilteredMcpToolset(McpToolset):
+    def __init__(self, config, *, tenant_tool_acl):
+        super().__init__(config)
+        self._acl = tenant_tool_acl  # dict[tenant_id, set[remote_tool_name]]
+    def build_schemas_for_request(self, request) -> list[ToolSchema]:
+        full = self.build_schemas()
+        allow = self._acl.get(request.tenant_id, None)
+        if allow is None: return full
+        return [s for s in full if s.name.split("__", 2)[-1] in allow]
+```
+
+SDK 本身不知道 "enabled_tools" / "tenant ACL" 这些业务概念,只提供 hook。
 
 ---
 
