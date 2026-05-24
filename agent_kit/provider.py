@@ -10,13 +10,13 @@ base_url / 重试 / 速率限制 全部在 provider 的构造函数里吃掉,loo
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Protocol
 
 from .types import Message, ToolCall
 
 
-@dataclass
+@dataclass(frozen=True)
 class ToolSchema:
     """暴露给 LLM 的工具 schema。对应 OpenAI tools / Anthropic tools 的统一中间格式。"""
 
@@ -24,14 +24,30 @@ class ToolSchema:
     description: str
     parameters: dict[str, Any]   # JSON Schema
 
+    def to_dict(self) -> dict[str, Any]:
+        return {"name": self.name, "description": self.description,
+                "parameters": dict(self.parameters)}
+
 
 @dataclass
 class LlmResponse:
     """provider.chat 的返回。"""
 
     text: str
-    tool_calls: list[ToolCall]
-    raw: dict[str, Any]          # provider 原始响应,留作 trace / debug
+    tool_calls: list[ToolCall] = field(default_factory=list)
+    usage: dict[str, Any] = field(default_factory=dict)
+    raw: dict[str, Any] = field(default_factory=dict)
+    finish_reason: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "text": self.text,
+            "tool_calls": [tc.to_dict() for tc in self.tool_calls],
+            "usage": dict(self.usage),
+            "finish_reason": self.finish_reason,
+            # raw is provider-specific; omit from dict to keep trace size sane;
+            # callers that need it can read response.raw directly.
+        }
 
 
 @dataclass
@@ -41,6 +57,15 @@ class LlmDelta:
     text_delta: str | None = None
     tool_call_delta: ToolCall | None = None
     finish_reason: str | None = None
+    usage: dict[str, Any] | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "text_delta": self.text_delta,
+            "tool_call_delta": self.tool_call_delta.to_dict() if self.tool_call_delta else None,
+            "finish_reason": self.finish_reason,
+            "usage": dict(self.usage) if self.usage else None,
+        }
 
 
 class LlmProvider(Protocol):

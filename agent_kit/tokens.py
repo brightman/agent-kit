@@ -15,19 +15,39 @@ loop 在 `compactor.should_compact` 调用时把 `last_usage` 也传过去,Compa
 
 from __future__ import annotations
 
+import json
+
 from .types import Message
 
 TOKEN_ESTIMATION_PADDING = 4 / 3   # 与 OpenHarness 一致;保守估计
 
 
 def estimate_text_tokens(text: str) -> int:
-    """单段文本估算。零依赖。"""
-    raise NotImplementedError   # Stage 1 实现
+    """单段文本估算。零依赖。空 string → 0。"""
+    if not text:
+        return 0
+    base = (len(text) + 3) // 4
+    return int(base * TOKEN_ESTIMATION_PADDING)
 
 
 def estimate_messages_tokens(messages: list[Message]) -> int:
-    """整段对话估算。包含 role / content / tool_calls / tool_call_id 的字符开销。"""
-    raise NotImplementedError   # Stage 1 实现
+    """整段对话估算。
+
+    覆盖:role / content / tool_calls(json 化估)/ tool_call_id 全部字符开销。
+    每条 message 加 4 token 固定头(对应 OpenAI 的 message overhead 经验值)。
+    """
+    total = 0
+    for m in messages:
+        total += 4                                   # per-message overhead
+        total += estimate_text_tokens(m.role)
+        total += estimate_text_tokens(m.content)
+        if m.tool_calls:
+            # tool_calls 序列化的总字符长度
+            payload = json.dumps([tc.to_dict() for tc in m.tool_calls], ensure_ascii=False)
+            total += estimate_text_tokens(payload)
+        if m.tool_call_id:
+            total += estimate_text_tokens(m.tool_call_id)
+    return total
 
 
 __all__ = ["TOKEN_ESTIMATION_PADDING", "estimate_text_tokens", "estimate_messages_tokens"]
