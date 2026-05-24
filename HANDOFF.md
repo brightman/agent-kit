@@ -9,7 +9,9 @@ Claude/Codex agent。读完应能直接接 Stage 5 干活。
 
 agent-kit 是一个从 baizhi-agent / fam-runtime / ADK / OpenHarness 四家共识里
 抽出来的最小 Python 工具包,提供 agent loop + skill + MCP 的机制(不绑策略)。
-当前进度 = **Stage 4 已落地**,190 tests 全绿,Stage 5(stream)是下一步。
+当前进度 = **Stage 4 + Runner.workspace_provider + 不内置 sandbox 决议** 已落地,
+197 tests 全绿,**Stage 5 改为 baizhi-agent 接入**(原 Stage 5 stream 已推迟,
+理由见 spec § 14 修订 2026-05-24)。
 
 ---
 
@@ -18,11 +20,11 @@ agent-kit 是一个从 baizhi-agent / fam-runtime / ADK / OpenHarness 四家共�
 | 维度 | 状态 |
 |---|---|
 | 仓库根 | `/Users/karama/Documents/baizhi/agent-kit/`(无 remote,本地 main)|
-| 最新 commit | Stage 4 — McpToolset 真实现 + Runner pre-warm + 33 tests |
-| 最新 tag | `stage-4`(也存在 `stage-0/1/2/3`, `tech-design-v1/v2/v3`)|
-| 测试 | **190/190 通过**,`~0.35s`(test_mcp.py 加了 33 个) |
-| Python | 3.11(`.venv/` 已建好,gitignored)|
-| 关键 deps | `mcp>=1.0` / `pyyaml` / `pydantic`;dev: `pytest` / `pytest-asyncio` / `anyio` |
+| 最新 commit | `1410c50` — baizhi pptx + websearch e2e harness;前一个 `32765a2` Runner.workspace_provider + § 16 sandbox-by-recipe |
+| 最新 tag | `stage-4`(stage-5/6 标号 + 内容已重排,见下) |
+| 测试 | **197 通过 + 1 skipped(live)**,`~0.35s` |
+| Python | 3.11(`.venv/` 已建好,gitignored) |
+| 关键 deps | `mcp>=1.0` / `pyyaml` / `pydantic`;dev: `pytest` / `pytest-asyncio` / `anyio` / `python-pptx`(给 baizhi e2e)|
 
 ---
 
@@ -34,7 +36,7 @@ agent-kit 是一个从 baizhi-agent / fam-runtime / ADK / OpenHarness 四家共�
 |---|---|---|
 | 项目名 = `agent-kit`(不是 baizhi-sdk / agent-sdk) | tag `stage-0` | "kit" 比 "sdk" 轻;PyPI 可注册 |
 | MCP lifecycle 枚举撤回 | commit `93a110e` + proposal.md errata | 4 档 enum 把"tenant"塞进 SDK,违边界;改为 ADK 的实例生命周期 = session 生命周期 |
-| Q1 stream:`RunRequest.stream=False` 默认,opt-in | tech-design § 3.7 / § 8.5 | 实际实现推到 Stage 5 |
+| Q1 stream:`RunRequest.stream=False` 默认,opt-in;**实现推迟到 Stage 7+** | tech-design § 3.7 / § 8.5 / § 14 修订 2026-05-24 | server-side machinery 用不到 token UX;mid-LLM cancel non-stream 轮间也能做;§ 4.4 tool_call delta 完整也没增益 |
 | Q2 skill 版本 pin:`name@version` 字符串 | tech-design § 6.6 / skill.py `parse_skill_ref` | 已实现 + 5 个测试 |
 | Q3 多模态:Stage 0-5 维持 `str` content | tech-design § 3.4 | 真需求出现再 break |
 | Q4 错误传播:`run` yield error event,`run_to_completion` raise | tech-design § 9.2 | **Stage 3 全部落地** |
@@ -71,66 +73,90 @@ agent-kit 是一个从 baizhi-agent / fam-runtime / ADK / OpenHarness 四家共�
 
 | 模块 | 何时做 | 缺什么 |
 |---|---|---|
-| `loop.py` stream 路径 | **Stage 5 = 下一步** | 当前 `request.stream=True` 走 error event;spec 在 § 8.5 |
-| Provider 真实现 | Stage 5 / Stage 6 | SDK 只有 Protocol;LiteLLM / Anthropic SDK 适配按使用方场景接 |
-| `ctx.emit` 路由 | Stage 3.5 候选(已被 Stage 4 跳过) | 当前是 no-op;真路由需要 asyncio.Queue 把 emit 合并进 yield 流 |
+| Provider 真实现(LiteLLM / Anthropic SDK adapter) | Stage 5 = baizhi 接入时 | SDK 只有 Protocol;adapter **放使用方仓库**,不进 agent-kit |
+| `loop.py` stream 路径 | **Stage 7+ 候选**(推迟,见 spec § 14 修订)| 当前 `request.stream=True` 走 error event;真消费者要求时再实现 |
+| `ctx.emit` 路由 | Stage 7+ 候选 | 当前是 no-op;真路由需要 asyncio.Queue 把 emit 合并进 yield 流 |
+| `Runner.cancel(run_id)` | Stage 7+ 候选 | 今天只能 hook 内 set ctx.cancel;外部触发要 `_active_runs` dict |
 
 ---
 
 ## Stage 5 接力(立即可干)
 
-**目标**:`AgentLoop.run()` 在 `request.stream=True` 时走 `provider.chat_stream`
-路径,emit `llm_delta` event(每个 delta 一次),最后 emit `llm_response`
-event(aggregate 完成)。
+**目标**:**baizhi-agent 接入** —— 把 baizhi-agent 内部 runner 替换成
+`agent_kit.Runner`,真 provider / real SkillRegistry / real WebSearch MCP
+接通,pptx e2e 跑通。原"Stage 5 stream"已推迟到 Stage 7+(理由见 spec § 14 修
+订;一句话:agent-kit 是 server-side machinery,现有 event 流够覆盖 90%,
+stream 真要时再做)。
 
-**spec 参考**:`docs/tech-design.md` § 8.5 + § 3.5 (llm_delta payload)
-+ § 4.4 (LlmDelta dataclass) + § 14 Stage 5 退出标准。
+### 已有的接入脚手架(本次 session 已交付)
+
+- `tests/test_baizhi_pptx_websearch_integration.py` —— **in-process** 集成测试,
+  覆盖真 pptx SKILL.md bundle + `web-search` MCP server_id + 整个 loop 用
+  scripted provider 模拟,无网络、确定性。当前**全绿**
+- `tests/test_baizhi_e2e_live_pptx_websearch.py` —— **opt-in live** 测试,
+  `@pytest.mark.live`,默认跳过。`pytest -m live` + 真 LLM/MCP secrets
+  exported 才跑;产物落 `e2e-output/`(已 gitignore)
+- `agent_kit/mcp.py` 已支持 `web-search` 这种带 `-` 的 server name
+- `agent_kit/skill.py` 已支持 SKILL.md 不显式声明 version(默认 "0.0.0",
+  baizhi 现有 bundled skills 用这个形态)
+- `Runner.workspace_provider`(§ 9.1)+ `ctx.workspace_ephemeral`(§ 5.2)
+  让 baizhi 的 tenant_agent 持久空间能映射进 SDK
 
 ### 任务清单
 
-1. **`agent_kit/loop.py`**:把现在 `request.stream=True → error event` 的
-   占位换成真路径。
-   - 调 `await self._provider.chat_stream(messages, tools, ...)`,得到
-     `AsyncIterator[LlmDelta]`
-   - 每收一个 delta 就 yield `Event(kind="llm_delta", ...)`(parent = round_start)
-   - 把 delta 聚合成最终 `LlmResponse`(累积 text、tool_calls、usage、finish_reason)
-   - aggregate 完成后 yield `Event(kind="llm_response", ...)`(与 non-stream 一致,
-     parent = round_start)
-   - 后续逻辑(after_model hook / tool dispatch / final_text)完全复用 non-stream 路径
-   - **partial tool_call delta**:spec § 4.4 已决定 LlmDelta.tool_call_delta 是
-     完整 ToolCall(不是 partial)—— 不要自作主张拆分
+1. **真 provider 接通**:
+   - baizhi 现在用什么 provider?(LiteLLM / Anthropic SDK 直连 / 别的?)
+   - 写一个 thin adapter 实现 `agent_kit.LlmProvider` Protocol,
+     **不**进 SDK,放 baizhi-agent 仓库里
+   - 用 `tests/test_baizhi_pptx_websearch_integration.py` 的 scripted 形态
+     作模板,替换成真 provider 跑
 
-2. **provider 实现需要一个真实例**:
-   - 现有 `_ScriptedProvider` 只实现了 chat;加一个 `_ScriptedStreamProvider`
-     在 test_loop.py(或新 test 文件),yield 一连串 LlmDelta
-   - 测试用例:text-only stream / tool_call-only / mixed text+tool_call /
-     finish_reason 在最后一个 delta / usage 在最后一个 delta
+2. **真 SkillRegistry 接通**:
+   - baizhi 现在的 skill 持久层在哪?接口跟 `agent_kit.SkillRegistry` 一致吗?
+   - 写一个 baizhi 自家的 `SkillRegistry` 子类(filesystem / db / 别的)
+   - 不进 SDK
 
-3. **provider 不支持 stream 时 fail-fast**:
-   - spec § 4.1:provider.chat_stream MUST `raise NotImplementedError` 若不支持
-   - loop catch 后 emit error event(stage="provider")
+3. **真 WebSearch MCP 接通**:
+   - 用 `McpServerConfig(name="web-search", transport=..., url=...)` 接
+     baizhi 的 WebSearch MCP server
+   - SDK 已经支持,只是配置
 
-4. **tests/test_loop.py 加 stream 子集**(估算 10-15 测试):
-   - 基本 stream → 多 delta → 一个 llm_response 收尾
-   - cancel 在 stream 中段:停止消费 delta,emit cancelled
-   - delta 流抛异常:emit error stage=provider
-   - non-stream / stream 在同一 RunRequest 切换不会破坏 messages 序列
+4. **workspace 注入**:
+   - 写 `workspace_provider`(callable)把 baizhi tenant_agent 空间映射成
+     `ctx.workspace`(spec § 9.1 给了示例)
+   - 注意:provider 自己负责 mkdir,SDK 不动
 
-5. **commit + tag**:
+5. **跑 live e2e**:
+   - 设好 secrets(WebSearch API key 等)
+   - `pytest -m live tests/test_baizhi_e2e_live_pptx_websearch.py`
+   - 产物在 `e2e-output/<filename>.pptx` 验
+   - 跑通 = Stage 5 主要工作完成
+
+6. **暴露的 SDK gap → 回填**:
+   - 接入过程一定会暴露 spec / API 不足。**记录下来**,回头补 spec § 16 recipes
+     或 SDK 本身。可能候选:
+     - `ctx.emit` 真路由(toolset 进度事件)
+     - `Runner.cancel(run_id)`
+     - SkillRegistry 缺方法 / 形态不对
+     - workspace_provider 边界(per-run 子目录 vs agent 级)
+   - 每个 gap 先讨论再 commit,不要"自然"做了(对照之前 Stage 3 / 4 修订风格)
+
+7. **commit + tag**:
    ```bash
-   git -C /Users/karama/Documents/baizhi/agent-kit add ...
-   git -C /Users/karama/Documents/baizhi/agent-kit commit -m "Stage 5: AgentLoop stream path + LlmDelta aggregation"
+   git -C /Users/karama/Documents/baizhi/agent-kit commit -m "Stage 5: baizhi-agent integration + recipes + ..."
    git -C /Users/karama/Documents/baizhi/agent-kit tag stage-5
    ```
+   注意:大部分 Stage 5 工作在 **baizhi-agent 仓库**,不是 agent-kit。agent-kit
+   这边主要是 recipes / gap 回填。
 
-### Stage 5 退出标准(对照 tech-design § 14)
+### Stage 5 退出标准(对照 tech-design § 14 修订)
 
 | 标准 | 怎么验 |
 |---|---|
-| stream/non-stream 切换不破坏 messages 流 | 同一 _ScriptedToolset,两次 run(stream + non-stream),tool_call 序列一致 |
-| `llm_delta` event payload 与 spec § 3.5 一致 | 测试断言 |
-| provider 不支持 stream → fail-fast 而不挂起 | NotImplementedError 测试 |
-| 200+ 测试全绿(估算)| `.venv/bin/python -m pytest` |
+| baizhi-agent pytest 不退化 | 在 baizhi-agent 仓库跑 |
+| pptx e2e live test 跑通 | `pytest -m live tests/test_baizhi_e2e_live_pptx_websearch.py` 绿 + e2e-output/ 有有效 pptx |
+| recipes 写齐 4 篇(workspace / SRT / MCP / skill-scripts) | `docs/recipes/` 4 个文件 |
+| 200+ tests 全绿(估算)| `.venv/bin/python -m pytest` |
 
 ---
 
@@ -214,7 +240,18 @@ baizhi-agent 项目有 CODEX.md 约定 Claude × Codex 协作;agent-kit 目前**
 
 ### Stage 4(MCP)
 - `2aa9579` Fix MCP lazy-connect spec(决议先行)
-- Stage 4 commit + tag `stage-4` — **McpToolset 真实现(3 transports + ${VAR} + idempotent connect/aclose)+ Runner pre-warm + 33 tests = 190 total**
+- `4ecd089` tag `stage-4` — **McpToolset 真实现(3 transports + ${VAR} + idempotent connect/aclose)+ Runner pre-warm + 33 tests = 190 total**
+
+### Stage 4 后续(sandbox 决议 + workspace_provider)
+- `32765a2` **Runner.workspace_provider + § 16 不内置 sandbox 决议 + 5 tests**(讨论历史:对比 ADK BaseCodeExecutor / openai-agents BaseSandboxSession,三场景都有外部解 → SDK 不内置)
+- `1410c50` **MCP/SKILL.md 名规则放宽 + baizhi pptx + websearch e2e 脚手架**(包含 in-process integration test + opt-in live test);**197 total**
+
+### Stage 5 (新) = baizhi-agent 接入(进行中)
+
+工作大部分在 baizhi-agent 仓库,不在 agent-kit。详见上面"Stage 5 接力"。
+
+### ~~Stage 5 (原)~~ stream 实现
+**推迟到 Stage 7+**。理由 + 决策见 spec § 14 修订 2026-05-24。
 
 ---
 
@@ -223,16 +260,18 @@ baizhi-agent 项目有 CODEX.md 约定 Claude × Codex 协作;agent-kit 目前**
 ```bash
 cd /Users/karama/Documents/baizhi/agent-kit
 .venv/bin/python -m pytest 2>&1 | tail -5
-# Expected: 190 passed in <1s
+# Expected: 197 passed, 1 skipped in <1s
 
 # 看现状
 cat HANDOFF.md
-cat docs/tech-design.md | sed -n '/^## 8\.5/,/^## 9\./p'   # Stage 5 重点(stream)
+cat docs/tech-design.md | sed -n '/^## 14/,/^## 15/p'  # 路线图(stream 推迟,Stage 5=baizhi 接入)
+cat docs/tech-design.md | sed -n '/^## 16/,/^## 附录/p' # sandbox 决议
+ls tests/test_baizhi*.py                                 # baizhi 集成脚手架
 
-# 开 Stage 5
+# 开 Stage 5(baizhi-agent 接入)
 git -C /Users/karama/Documents/baizhi/agent-kit log --oneline --decorate | head
 ```
 
 ---
 
-最后更新:2026-05-24,stage-4 落地后。
+最后更新:2026-05-24,Stage 4 后续 + 路线图重排后。

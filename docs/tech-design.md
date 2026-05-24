@@ -1183,28 +1183,42 @@ mcp 大 payload)。零 LLM 成本,覆盖 80% 场景。
 
 | Q | 决议 | 落到本文档哪节 |
 |---|---|---|
-| **Q1 stream** | `RunRequest.stream: bool = False`,opt-in 走 `chat_stream` 路径;`llm_response` event 两种模式都 emit | § 3.7 / § 4 / § 8.5 |
+| **Q1 stream** | `RunRequest.stream: bool = False`,opt-in 走 `chat_stream` 路径;`llm_response` event 两种模式都 emit。**实现推迟**(原 Stage 5 → 推到有真消费者要求时再做,详见 § 14 修订 2026-05-24) | § 3.7 / § 4 / § 8.5 / § 14 |
 | **Q2 版本 pin** | `enabled_skills` 支持 `"name@version"` 字符串语法;`SkillRegistry.load(version=None)` | § 3.7 / § 6.5 / § 6.6 |
 | **Q3 多模态** | Stage 0–5 维持 `content: str`;真需求出现再破坏性升级 `str \| list[ContentBlock]` | § 3.4 / § 15 |
 | **Q4 错误传播** | 双轨:`run` yield error event,`run_to_completion` raise;loop 内部 try/except 把异常封到 event | § 3.8 / § 9.2 / § 9.3 |
 
 ---
 
-## 14. 迭代路线
+## 14. 迭代路线(修订 2026-05-24)
 
 | Stage | 内容 | 退出标准 |
 |---|---|---|
 | **0** | 仓库骨架 + 设计文档 ✓ | 模块 stub 可 import ✓ |
-| **1** | types / provider / toolset / skill / **tokens / context(含 TruncatingCompactor + safe_split) / hooks(Hook 基类 + 4 no-op)** 实现 + 单元测试 | 40+ 单测全绿,context 模块单测覆盖 ADK safe_split 全部边界,hooks 模块单测覆盖 4 个 method 签名 |
-| **2** | loop 实现(非 stream + cancel + max_rounds + **compactor 集成 + 兜底校验 + 4 个 hook 调用 + first-non-None 短路 + short_circuited event**) + 集成测试 | FakeProvider 跑通 flashidea;TruncatingCompactor 触发后 `context_compacted` event emit;hook 短路触发后对应 short_circuited event emit;hook 异常被 catch + 转 error event |
-| **3** | runner 实现(run + run_to_completion + 资源生命周期) + 端到端测试 | RunResult 行为符合契约 |
-| **4** | mcp 实现(lazy connect + aclose,wrap `mcp` SDK) + 真打测试 | 真打 DashScope WebSearch OK,4 种使用方 lifecycle 用例(per-call / per-run / per-tenant / global)各跑一次 |
-| **5** | stream 实现(Q1 决议) + provider.chat_stream 接 LiteLLM 等 | stream/non-stream 切换不破坏 |
-| **6** | baizhi-agent 替换内部 runner → agent-kit.Runner | baizhi-agent pytest 不退化 |
-| **7** | fam-runtime 替换 | fam-runtime pytest 不退化 |
+| **1** | types / provider / toolset / skill / **tokens / context(含 TruncatingCompactor + safe_split) / hooks(Hook 基类 + 4 no-op)** 实现 + 单元测试 ✓ | 40+ 单测全绿,context 模块单测覆盖 ADK safe_split 全部边界,hooks 模块单测覆盖 4 个 method 签名 |
+| **2** | loop 实现(非 stream + cancel + max_rounds + **compactor 集成 + 兜底校验 + 4 个 hook 调用 + first-non-None 短路 + short_circuited event**) + 集成测试 ✓ | FakeProvider 跑通 flashidea;TruncatingCompactor 触发后 `context_compacted` event emit;hook 短路触发后对应 short_circuited event emit;hook 异常被 catch + 转 error event |
+| **3** | runner 实现(run + run_to_completion + 资源生命周期 + skill catalog discovery + AgentLoop.aclose) + 端到端测试 ✓ | RunResult 行为符合契约 |
+| **4** | mcp 实现(lazy connect + aclose,wrap `mcp` SDK)+ Runner pre-warm + 真打测试 ✓ | 真打 in-memory FastMCP OK,4 种使用方 lifecycle 用例(per-call / per-run / per-tenant / global)各跑一次 |
+| **4 附** | Runner.workspace_provider(让外部 workspace 注入)+ 不内置 sandbox 决议(§ 16)✓ | workspace_provider tests 全绿,§ 16 落地 |
+| **5** | **baizhi-agent 接入** —— 替换内部 runner → agent-kit.Runner + 真 provider / real SkillRegistry / real MCP 接通 + recipes 写 | baizhi-agent pytest 不退化;pptx e2e live test 跑通 |
+| **6** | fam-runtime 接入 | fam-runtime pytest 不退化;per-family MCP lifecycle 用例验证 |
+| ~~**5 (原)**~~ | ~~stream 实现~~ | **推迟,改为 Stage 7+ 候选** |
+| **7+(候选)** | stream 实现(若 baizhi / fam 真要)+ provider.chat_stream 接 LiteLLM 等 | stream/non-stream 切换不破坏 |
+| **7+(候选)** | `ctx.emit` 真路由 + Runner.cancel(run_id) | 真消费者驱动 |
+
+**Stage 5 (原 stream) 为什么推迟**(决策 2026-05-24,讨论见对话历史):
+
+- agent-kit 定位是 server-side machinery,主要消费者是持久化 trace 和后端聚合,**不需要 token-level 进度**
+- 现有 event 流(round_start / llm_request / llm_response / tool_call / tool_result / round_end / final_text)已经覆盖 90% 用例
+- stream 的两个真价值:
+  - typing animation UX —— baizhi / fam server-side 场景几乎用不到
+  - mid-LLM-call cancel —— non-stream 也能在轮间 cancel,粒度粗一点但够用
+- spec § 4.4 已决议 tool_call delta 是**完整 ToolCall**(不切碎),所以 stream 在"提前感知 tool_call"上**也没增益**
+- 成本:每个 provider 都要写 chat_stream;事件量 ~50:1
+- 现状保留:`RunRequest.stream` flag、`LlmDelta` 数据类、`EventKind.llm_delta` 字面量都不动,真有消费者要时直接实现即可,不需要 break 兼容
 
 **回退路径**:每 Stage 独立 commit + tag。任意 Stage 发现抽象不对,可回滚上一
-Stage 重做;baizhi-agent / fam-runtime 在 Stage 6/7 之前完全不受影响。
+Stage 重做;baizhi-agent / fam-runtime 在 Stage 5/6 之前完全不受影响。
 
 ---
 
