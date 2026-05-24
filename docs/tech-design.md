@@ -996,7 +996,7 @@ runner = Runner(
 )
 ```
 
-### 9.2 双 API(Q4 决议)
+### 9.2 三 API(Q4 决议 + Stage 5 修订)
 
 ```python
 async def run(self, request: RunRequest) -> AsyncIterator[Event]:
@@ -1006,6 +1006,21 @@ async def run(self, request: RunRequest) -> AsyncIterator[Event]:
 async def run_to_completion(self, request: RunRequest) -> RunResult:
     """聚合形式。遇 error event raise RuntimeError(包含原 exc_type / message)。
     SHOULD 用于脚本 / 测试 / 一次性 CLI 场景。"""
+
+def run_sync(self, request: RunRequest) -> RunResult:
+    """同步 wrapper —— `asyncio.run(self.run_to_completion(request))`。
+
+    用于纯 sync 调用方(CLI、命令行脚本、Jupyter notebook 同步 cell,
+    或要 incremental 迁移的 sync codebase 如 baizhi-agent)。
+
+    MUST NOT 在已经跑着的 event loop 里调(FastAPI handler、async test、
+    Jupyter async cell):detect 后 raise 友好错误,而不是让 Python 抛
+    `RuntimeError: asyncio.run() cannot be called from a running event loop`。
+
+    形态参考 openai-agents Runner.run_sync;
+    **不**返 Generator(若需要 sync 实时事件流,见 § 14 Stage 7+ 候选,
+    类似 ADK 的"后台线程 + queue 桥接"模式,**当前不实现**)。
+    """
 ```
 
 ### 9.3 资源生命周期(Stage 3 修订 2026-05-24)

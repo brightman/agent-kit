@@ -79,6 +79,7 @@ agent-kit 是一个从 baizhi-agent / fam-runtime / ADK / OpenHarness 四家共�
 | `loop.py` stream 路径 | **Stage 7+ 候选**(推迟,见 spec § 14 修订)| 当前 `request.stream=True` 走 error event;真消费者要求时再实现 |
 | `ctx.emit` 路由 | Stage 7+ 候选 | 当前是 no-op;真路由需要 asyncio.Queue 把 emit 合并进 yield 流 |
 | `Runner.cancel(run_id)` | Stage 7+ 候选 | 今天只能 hook 内 set ctx.cancel;外部触发要 `_active_runs` dict |
+| `Runner.run_sync_stream()` 后台线程 + queue(ADK 形态)| Stage 7+ 候选 | 当前只有 `run_sync()` 一次性返,无 sync 实时事件流 |
 
 ---
 

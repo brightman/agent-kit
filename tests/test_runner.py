@@ -666,3 +666,59 @@ async def test_workspace_provider_raises_yields_setup_error(tmp_path: Path) -> N
     assert len(error_evts) == 1
     assert error_evts[0].payload["stage"] == "setup"
     assert "provider exploded" in error_evts[0].payload["message"]
+
+
+# ---- run_sync (spec § 9.2 Stage 5 修订) ----
+
+
+def test_run_sync_returns_run_result(tmp_path: Path) -> None:
+    """Pure-sync caller gets the same RunResult as run_to_completion."""
+    provider = _ScriptedProvider([LlmResponse(text="hello sync", tool_calls=[])])
+    runner = Runner(provider, toolsets=[], workspace_root=tmp_path / "ws")
+    result = runner.run_sync(_basic_req())
+    assert isinstance(result, RunResult)
+    assert result.final_text == "hello sync"
+    assert result.error is None
+    assert result.cancelled is False
+    assert result.rounds_used == 1
+
+
+def test_run_sync_raises_on_error_event(tmp_path: Path) -> None:
+    """Same Q4 contract as run_to_completion: error event → RuntimeError."""
+
+    class _Boom:
+        name = "boom"
+        async def chat(self, *a, **k):
+            raise ValueError("nope")
+        async def chat_stream(self, *a, **k):
+            raise NotImplementedError
+
+    runner = Runner(_Boom(), toolsets=[], workspace_root=tmp_path / "ws")
+    with pytest.raises(RuntimeError, match=r"\[provider\] ValueError: nope"):
+        runner.run_sync(_basic_req())
+
+
+def test_run_sync_workspace_provider(tmp_path: Path) -> None:
+    """workspace_provider works through the sync wrapper (no async-specific glue)."""
+    external = tmp_path / "persistent"
+    external.mkdir()
+    provider = _ScriptedProvider([LlmResponse(text="ok", tool_calls=[])])
+    runner = Runner(
+        provider, toolsets=[],
+        workspace_provider=lambda req, run_id: external,
+    )
+    result = runner.run_sync(_basic_req())
+    assert result.error is None
+    assert external.exists()  # caller-owned, SDK doesn't delete
+
+
+@pytest.mark.asyncio
+async def test_run_sync_rejected_inside_running_event_loop(tmp_path: Path) -> None:
+    """Called from inside a running loop → friendly RuntimeError, not the cryptic asyncio one."""
+    provider = _ScriptedProvider([LlmResponse(text="x", tool_calls=[])])
+    runner = Runner(provider, toolsets=[], workspace_root=tmp_path / "ws")
+    with pytest.raises(
+        RuntimeError,
+        match=r"run_sync\(\).*cannot be called from a running event loop",
+    ):
+        runner.run_sync(_basic_req())

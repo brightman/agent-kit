@@ -284,6 +284,31 @@ class Runner:
             error=error,
         )
 
+    def run_sync(self, request: RunRequest) -> RunResult:
+        """同步 wrapper —— 内部就是 `asyncio.run(self.run_to_completion(request))`。
+
+        spec § 9.2 (Stage 5 修订):给纯 sync 调用方(CLI / 命令行脚本 /
+        Jupyter sync cell / sync codebase 渐进迁移如 baizhi-agent)用。
+
+        **不能在已经跑着的 event loop 里调**(FastAPI handler / async test /
+        Jupyter async cell)—— fail-fast 报友好错误,而不是让 Python 抛
+        `RuntimeError: asyncio.run() cannot be called from a running event loop`。
+        那种场景请直接 `await runner.run_to_completion(request)`。
+
+        形态参考 openai-agents `Runner.run_sync`;**不返 Generator**
+        (若需要 sync 实时事件流,见 spec § 14 Stage 7+ 候选)。
+        """
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            # 没有跑着的 loop —— 可以用 asyncio.run
+            return asyncio.run(self.run_to_completion(request))
+        raise RuntimeError(
+            "Runner.run_sync() cannot be called from a running event loop "
+            "(FastAPI handler, async test, Jupyter async cell). "
+            "Use `await runner.run_to_completion(request)` instead."
+        )
+
     # ---- helpers ----
 
     async def _prewarm_toolsets(self) -> None:
