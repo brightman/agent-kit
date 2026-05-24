@@ -10,13 +10,16 @@ Keys are loaded from baizhi-agent/.baizhi-agent/config/.env and never printed.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import time
+import urllib.error
 import urllib.request
+from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Awaitable, Callable, TypeVar
 
 import pytest
 
@@ -35,6 +38,65 @@ BAIZHI_ENV_FILE = BAIZHI_AGENT_ROOT / ".baizhi-agent" / "config" / ".env"
 BUNDLED_SKILLS_ROOT = BAIZHI_AGENT_ROOT / "bundled_skills"
 WEBSEARCH_URL = "https://dashscope.aliyuncs.com/api/v1/mcps/WebSearch/mcp"
 TASK = "深度搜索anthropic 关于AI Native orgnization组织方式的材料，生成一份可以分享的ppt"
+
+
+T = TypeVar("T")
+
+
+# Transient = OS / network glitch we expect to clear on next attempt.
+# Observed on macOS during live runs:
+#   - EADDRNOTAVAIL (Errno 49) when the kernel can't allocate a source port
+#   - timeouts during DNS / TLS / first byte
+#   - 502 / 503 / 504 from the gateway
+# Auth failures (401 / 403) and 4xx user errors are NOT transient — they
+# come straight up.
+_TRANSIENT_HTTP_STATUS = {429, 502, 503, 504}
+_TRANSIENT_OS_ERRNO = {49, 60, 61, 65, 110}  # EADDRNOTAVAIL/ETIMEDOUT/ECONNREFUSED/ENETUNREACH
+
+
+def _is_transient(exc: BaseException) -> bool:
+    """Return True for known-flaky network/OS errors, recursing into
+    BaseExceptionGroup so anyio-wrapped MCP failures are recognized too."""
+    if isinstance(exc, BaseExceptionGroup):
+        return any(_is_transient(sub) for sub in exc.exceptions)
+    if isinstance(exc, urllib.error.HTTPError):
+        return exc.code in _TRANSIENT_HTTP_STATUS
+    if isinstance(exc, urllib.error.URLError):
+        # URLError wraps OS errors via .reason
+        reason = exc.reason
+        if isinstance(reason, OSError) and reason.errno in _TRANSIENT_OS_ERRNO:
+            return True
+        if isinstance(reason, TimeoutError):
+            return True
+        return False
+    if isinstance(exc, OSError) and exc.errno in _TRANSIENT_OS_ERRNO:
+        return True
+    if isinstance(exc, (TimeoutError, asyncio.TimeoutError)):
+        return True
+    return False
+
+
+async def _retry_transient(
+    fn: Callable[[], Awaitable[T]],
+    *,
+    attempts: int = 3,
+    base_delay: float = 0.5,
+) -> T:
+    """Run `fn` up to `attempts` times, sleeping `base_delay * 2**i` between
+    attempts on transient failures. Non-transient = first exception re-raised."""
+    last: BaseException | None = None
+    for i in range(attempts):
+        try:
+            return await fn()
+        except BaseException as exc:  # noqa: BLE001
+            if not _is_transient(exc):
+                raise
+            last = exc
+            if i == attempts - 1:
+                break
+            await asyncio.sleep(base_delay * (2 ** i))
+    assert last is not None
+    raise last
 
 
 def _load_env_file(path: Path) -> None:
@@ -79,17 +141,24 @@ class _MiniMaxAgentKitProvider:
 
         started = time.perf_counter()
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        request = urllib.request.Request(
-            f"{self.base_url.rstrip('/')}/chat/completions",
-            data=body,
-            headers={
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
-            },
-            method="POST",
-        )
-        with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
-            raw = json.loads(response.read().decode("utf-8"))
+        url = f"{self.base_url.rstrip('/')}/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+
+        # spec § 4.5:provider 应当自己重试 transient error
+        async def _one_call() -> dict[str, Any]:
+            def _blocking() -> dict[str, Any]:
+                req = urllib.request.Request(
+                    url, data=body, headers=headers, method="POST"
+                )
+                with urllib.request.urlopen(req, timeout=self.timeout_seconds) as r:
+                    return json.loads(r.read().decode("utf-8"))
+
+            return await asyncio.to_thread(_blocking)
+
+        raw = await _retry_transient(_one_call, attempts=3, base_delay=0.5)
         duration_ms = max(1, round((time.perf_counter() - started) * 1000))
         choice = raw["choices"][0]
         message = choice["message"]
@@ -164,6 +233,21 @@ def _decode_tool_calls(raw_calls: list[dict[str, Any]]) -> list[ToolCall]:
             )
         )
     return calls
+
+
+class _RetryingMcpToolset(McpToolset):
+    """McpToolset whose `connect()` retries transient OS / network errors.
+
+    The macOS environment running these tests intermittently fails the
+    HTTP transport handshake with `EADDRNOTAVAIL`(Errno 49)wrapped by
+    anyio's TaskGroup as an ExceptionGroup; without retry, ~25% of live
+    runs flake at setup. spec § 7.2 leaves lifecycle to the use site, so
+    putting retry **outside** the SDK in a test-side subclass keeps the
+    base McpToolset honest about being a single-shot wrapper.
+    """
+
+    async def connect(self) -> None:
+        await _retry_transient(super().connect, attempts=3, base_delay=1.0)
 
 
 class _PptxDeckToolset(BaseToolset):
@@ -350,7 +434,7 @@ async def test_live_llm_websearch_and_pptx_artifact(tmp_path: Path) -> None:
         FilesystemSkillRegistry(BUNDLED_SKILLS_ROOT),
         tenant_id="tenant-baizhi-e2e",
     )
-    websearch = McpToolset(
+    websearch = _RetryingMcpToolset(
         McpServerConfig(
             name="web-search",
             transport="http",
