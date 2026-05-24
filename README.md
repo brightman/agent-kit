@@ -36,7 +36,12 @@ SDK)—— 只提供骨架,不绑定上层业务。
 
 ## Design
 
-完整设计见 [docs/design.md](docs/design.md)。模块划分:
+- **[docs/tech-design.md](docs/tech-design.md)** —— Stage 1 实现 spec(契约级,
+  RFC 2119 措辞,Reviewer 读完应能逐条断言)
+- **[docs/proposal.md](docs/proposal.md)** —— 原始抽象提案 + 4 个开放问题的
+  讨论历史(已在 tech-design § 13 决议)
+
+模块划分:
 
 ```
 agent_kit/
