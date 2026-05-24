@@ -567,24 +567,54 @@ ADK / OpenHarness / baizhi-agent / fam-runtime **均无 lifecycle 枚举**:
 ```python
 class McpToolset(BaseToolset):
     def __init__(self, config: McpServerConfig, *, secrets: dict[str, str] | None = None):
-        self._config = config
-        self._secrets = secrets or {}
+        self._config = config        # ${VAR} 已在此处一次性替换完(§ 7.3)
         self.name = f"mcp__{config.name}"
-        self._session = None     # lazy: 首次 build_schemas / execute 时 connect
+        self._session = None
+        self._schemas: list[ToolSchema] = []
+        self._connected = False
+
+    async def connect(self) -> None:
+        """启动 transport + ClientSession,initialize + list_tools,缓存 schemas。
+        idempotent —— 多次调用只 connect 一次。Runner 在 setup 阶段自动调,
+        直接用 AgentLoop 的使用方需自己 `await toolset.connect()`。"""
 
     def build_schemas(self) -> list[ToolSchema]:
-        """首次调用 lazy connect + list_tools + 缓存。后续返回缓存 schemas。
-        Stage 1 实现:同步 wrapper(asyncio.run 在 init 中,与 baizhi-agent
-        mcp_session 一致)。"""
+        """返回 connect 时缓存的 schemas。未 connect 调用 raise RuntimeError。"""
 
     async def execute(self, call: ToolCall, ctx: ToolCallContext) -> ToolResult:
-        """复用 self._session(若未 connect 则 lazy connect),call tool,返回。
+        """复用 self._session call tool,返回。
         - isError=True 的 MCP 响应 → ToolResult(is_error=True, content=msg)
-        - 传输 / SDK 异常 → ToolResult(is_error=True, content=f"ERROR: {exc}")"""
+        - 传输 / SDK 异常 → ToolResult(is_error=True, content=f"ERROR: {exc}")
+        - 未 connect 调用 → ToolResult(is_error=True, content="ERROR: not connected")"""
 
     async def aclose(self) -> None:
-        """关闭 self._session(若已 connect)。idempotent。"""
+        """关闭 self._session + transport(若已 connect)。idempotent。"""
 ```
+
+#### 7.5.1 Lazy connect 与 sync `build_schemas` 的张力(Stage 4 修订 2026-05-24)
+
+**问题**:`BaseToolset.build_schemas` 是同步方法(spec § 5.1),Router init 期会
+立刻调用做命名冲突校验。但 MCP connect / list_tools 是 async。
+原 spec § 7.5 草稿写"在 __init__ 里 `asyncio.run` 同步起 session" —— 这在
+event loop 已经跑(Runner / 测试)的环境会直接 RuntimeError。
+
+**决议**:**显式 `async connect()` + Runner 自动 pre-warm**。
+
+- `McpToolset.connect()` 是 async,完成 transport 启动 + session.initialize
+  + list_tools,把 schemas 缓存到实例字段
+- `build_schemas()` 仅返回缓存;未 connect 时 raise `RuntimeError("call await
+  toolset.connect() first")`(fail-fast,设计错而非数据错)
+- **Runner 在 setup 阶段**遍历 `self._toolsets`,对每个有 `connect` 协程的
+  实例 await 它(`hasattr(ts, "connect") and inspect.iscoroutinefunction
+  (ts.connect)`)—— 让"用 Runner"的常路径无样板
+- 使用方直接用 AgentLoop(没经 Runner)时,自己负责 `await
+  toolset.connect()` 后再 new Loop
+- `connect()` MUST idempotent:多次调用只生效一次,允许跨 run 复用(per-tenant
+  / global 场景),搭配 `aclose()` 的 idempotent 一起构成"安全重入"
+
+**为什么不改 build_schemas 为 async**:那是 spec 的下游断点 —— Router / 所有
+现有 toolset / 所有现有测试都要跟着改。"explicit connect + runner pre-warm"
+是侵入面最小的方案,且符合 ADK 的 toolset awakening 范式。
 
 ### 7.6 便利函数(可选)
 
