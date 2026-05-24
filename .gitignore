@@ -34,3 +34,6 @@ htmlcov/
 .env
 .env.*
 !.env.example
+
+# E2E test artifacts(生成的 pptx / 图片 / 等)
+e2e-output/

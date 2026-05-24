@@ -41,8 +41,9 @@ from .toolset import BaseToolset, ToolCallContext
 from .types import ToolCall, ToolResult
 
 
-# spec § 7.4:server.name 不能含 "__"(与命名前缀分隔符冲突)+ 只小写字母数字下划线
-_SERVER_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
+# spec § 7.4:server.name 不能含 "__"(与命名前缀分隔符冲突)。
+# 允许短横线以兼容 baizhi-agent catalog 中的 `web-search` server_id。
+_SERVER_NAME_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 _VAR_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 

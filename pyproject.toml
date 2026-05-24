@@ -25,6 +25,7 @@ litellm = ["litellm>=1.40"]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
+    "python-pptx>=1.0.2",
     "ruff>=0.5",
     "mypy>=1.10",
 ]
@@ -39,3 +40,6 @@ target-version = "py311"
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+    "live: tests that call real external LLM/MCP services and may spend quota",
+]

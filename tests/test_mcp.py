@@ -124,6 +124,11 @@ def test_config_rejects_uppercase_name() -> None:
         McpServerConfig(name="GitHub", transport="stdio", command=["x"])
 
 
+def test_config_accepts_baizhi_hyphenated_server_id() -> None:
+    cfg = McpServerConfig(name="web-search", transport="http", url="https://example.test/mcp")
+    assert cfg.name == "web-search"
+
+
 def test_config_rejects_stdio_without_command() -> None:
     with pytest.raises(ValueError, match="requires command"):
         McpServerConfig(name="x", transport="stdio")

@@ -102,7 +102,8 @@ def parse_frontmatter(md: str) -> tuple[SkillFrontmatter, str]:
     - 之后到下一个 '---\\n' 之间是 YAML
     - 之后 strip 前导空行后是 body
 
-    Required frontmatter fields: name / description / version。
+    Required frontmatter fields: name / description。
+    version 可缺省,兼容现有 bundled skills;缺省为 "0.0.0"。
     """
     if not md.startswith("---"):
         raise ValueError("SKILL.md must start with '---' frontmatter delimiter")
@@ -135,14 +136,14 @@ def parse_frontmatter(md: str) -> tuple[SkillFrontmatter, str]:
     if not isinstance(raw, dict):
         raise ValueError(f"SKILL.md frontmatter must be YAML mapping, got {type(raw).__name__}")
 
-    for required in ("name", "description", "version"):
+    for required in ("name", "description"):
         if required not in raw:
             raise ValueError(f"SKILL.md frontmatter missing required field: {required!r}")
 
     fm = SkillFrontmatter(
         name=str(raw["name"]),
         description=str(raw["description"]),
-        version=str(raw["version"]),
+        version=str(raw.get("version", "0.0.0")),
         tools=tuple(raw.get("tools", []) or []),
         inputs=raw.get("inputs"),
         raw=raw,

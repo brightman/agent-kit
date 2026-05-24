@@ -104,16 +104,17 @@ def test_parse_missing_closing_raises() -> None:
         parse_frontmatter("---\nname: x\ndescription: y\nversion: 1\n")
 
 
-def test_parse_missing_required_field_raises() -> None:
+def test_parse_missing_version_defaults_for_bundled_skills() -> None:
     md = """---
 name: x
-description: missing version
+description: bundled skill without explicit version
 ---
 
 body
 """
-    with pytest.raises(ValueError, match="missing required field"):
-        parse_frontmatter(md)
+    fm, body = parse_frontmatter(md)
+    assert fm.version == "0.0.0"
+    assert body == "body\n"
 
 
 def test_parse_yaml_not_mapping_raises() -> None:
