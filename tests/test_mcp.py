@@ -72,11 +72,12 @@ class _InMemMcpToolset(McpToolset):
     """Test seam: opens memory streams + spawns the FastMCP server task
     instead of a real transport. Same behavior surface as production."""
 
-    def __init__(self, server: FastMCP, name: str = "test") -> None:
+    def __init__(self, server: FastMCP, name: str = "test", *, tool_filter=None) -> None:
         # The McpServerConfig values are only used for naming/limits, not
         # for the transport (overridden below)
         super().__init__(
-            McpServerConfig(name=name, transport="stdio", command=["unused"])
+            McpServerConfig(name=name, transport="stdio", command=["unused"]),
+            tool_filter=tool_filter,
         )
         self._server = server
 
@@ -527,6 +528,122 @@ async def test_runner_prewarm_failure_emits_setup_error(tmp_path) -> None:
     assert len(error_evts) == 1
     assert error_evts[0].payload["stage"] == "setup"
     assert "connect blew up" in error_evts[0].payload["message"]
+
+
+# ---- tool_filter (spec § 7.5.2) ----
+
+
+@pytest.mark.asyncio
+async def test_tool_filter_default_none_exposes_all() -> None:
+    """No filter → all 3 server tools become schemas."""
+    srv = _make_server("svc")
+    ts = _InMemMcpToolset(srv, name="svc")  # tool_filter=None default
+    try:
+        await ts.connect()
+        names = {s.name for s in ts.build_schemas()}
+        assert names == {"mcp__svc__echo", "mcp__svc__add", "mcp__svc__fail"}
+    finally:
+        await ts.aclose()
+
+
+@pytest.mark.asyncio
+async def test_tool_filter_whitelist_keeps_only_named() -> None:
+    """`tool_filter=["echo"]` → only echo exposed; matches REMOTE name (not prefixed)."""
+    srv = _make_server("svc")
+    ts = _InMemMcpToolset(srv, name="svc", tool_filter=["echo"])
+    try:
+        await ts.connect()
+        names = [s.name for s in ts.build_schemas()]
+        assert names == ["mcp__svc__echo"]
+    finally:
+        await ts.aclose()
+
+
+@pytest.mark.asyncio
+async def test_tool_filter_whitelist_multiple_remote_names() -> None:
+    srv = _make_server("svc")
+    ts = _InMemMcpToolset(srv, name="svc", tool_filter=["echo", "add"])
+    try:
+        await ts.connect()
+        names = {s.name for s in ts.build_schemas()}
+        assert names == {"mcp__svc__echo", "mcp__svc__add"}
+    finally:
+        await ts.aclose()
+
+
+@pytest.mark.asyncio
+async def test_tool_filter_unknown_names_silently_excluded() -> None:
+    """Unknown filter entries don't error — just nothing matches them.
+
+    Rationale: catalog can change; failing whole toolset just because one
+    filtered name is gone would be more disruptive than helpful.
+    """
+    srv = _make_server("svc")
+    ts = _InMemMcpToolset(srv, name="svc", tool_filter=["echo", "does_not_exist"])
+    try:
+        await ts.connect()
+        names = {s.name for s in ts.build_schemas()}
+        assert names == {"mcp__svc__echo"}
+    finally:
+        await ts.aclose()
+
+
+@pytest.mark.asyncio
+async def test_tool_filter_empty_list_exposes_nothing() -> None:
+    """`tool_filter=[]` is an explicit "block everything" — useful for a
+    debugging toggle ("disable this MCP without removing it from toolsets")."""
+    srv = _make_server("svc")
+    ts = _InMemMcpToolset(srv, name="svc", tool_filter=[])
+    try:
+        await ts.connect()
+        assert ts.build_schemas() == []
+    finally:
+        await ts.aclose()
+
+
+@pytest.mark.asyncio
+async def test_tool_filter_callable_predicate() -> None:
+    """`tool_filter=lambda s: ...` for arbitrary filtering."""
+    srv = _make_server("svc")
+    # Keep tools whose remote name is exactly 3 letters
+    ts = _InMemMcpToolset(
+        srv, name="svc",
+        tool_filter=lambda s: len(s.name.split("__", 2)[-1]) == 3,
+    )
+    try:
+        await ts.connect()
+        names = {s.name for s in ts.build_schemas()}
+        assert names == {"mcp__svc__add"}  # only "add" is 3 letters
+    finally:
+        await ts.aclose()
+
+
+@pytest.mark.asyncio
+async def test_tool_filter_excludes_from_router_path() -> None:
+    """Filtered-out tool isn't routed to the toolset (Router doesn't know it).
+
+    Defense-in-depth: even if the LLM hallucinates `mcp__svc__fail` after we
+    filtered to ["echo"], the Router never registered `fail`, so `execute`
+    wouldn't get called for it. Verified end-to-end here via Router.
+    """
+    from agent_kit.toolset import ToolsetRouter
+
+    srv = _make_server("svc")
+    ts = _InMemMcpToolset(srv, name="svc", tool_filter=["echo"])
+    try:
+        await ts.connect()
+        router = ToolsetRouter([ts])
+        registered_names = {s.name for s in router.all_schemas()}
+        assert registered_names == {"mcp__svc__echo"}
+        # Try to execute a filtered-out tool → router returns "unknown tool"
+        r = await router.execute(
+            ToolCall(id="c1", name="mcp__svc__fail", arguments={}),
+            _ctx(),
+        )
+        assert r.is_error
+        assert "unknown tool" in r.content
+    finally:
+        await ts.aclose()
 
 
 # ---- helpers ----

@@ -31,7 +31,7 @@ import re
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field, replace
 from datetime import timedelta
-from typing import Any, Literal
+from typing import Any, Callable, Literal, Sequence, Union
 
 from mcp import ClientSession
 from mcp import types as mcp_types
@@ -158,9 +158,23 @@ class McpToolset(BaseToolset):
         config: McpServerConfig,
         *,
         secrets: dict[str, str] | None = None,
+        tool_filter: Union[
+            Sequence[str], Callable[[ToolSchema], bool], None
+        ] = None,
     ) -> None:
         self._config = _substitute_config(config, secrets or {})
         self.name = f"mcp__{self._config.name}"
+        # spec § 7.5.2:None = 全暴露;Sequence[str] = 白名单(按 remote tool
+        # name 匹配,不含 `mcp__<server>__` 前缀);Callable = 谓词
+        self._tool_filter: (
+            frozenset[str] | Callable[[ToolSchema], bool] | None
+        )
+        if tool_filter is None:
+            self._tool_filter = None
+        elif callable(tool_filter):
+            self._tool_filter = tool_filter
+        else:
+            self._tool_filter = frozenset(tool_filter)
         self._stack: AsyncExitStack | None = None
         self._session: ClientSession | None = None
         self._schemas: list[ToolSchema] = []
@@ -175,7 +189,22 @@ class McpToolset(BaseToolset):
                 f"{self.name}: not connected — call `await toolset.connect()` first "
                 f"(Runner pre-warms automatically; see tech-design § 7.5.1)"
             )
-        return list(self._schemas)
+        return self._apply_filter(self._schemas)
+
+    def _apply_filter(self, schemas: list[ToolSchema]) -> list[ToolSchema]:
+        """spec § 7.5.2:tool_filter 过滤 schemas。filter 看的是 remote tool
+        name(不含 `mcp__<server>__` 前缀);用户写白名单时只关心远端名字。"""
+        flt = self._tool_filter
+        if flt is None:
+            return list(schemas)
+        if callable(flt):
+            return [s for s in schemas if flt(s)]
+        # frozenset[str] — whitelist on remote tool name
+        prefix = f"{self.name}__"
+        return [
+            s for s in schemas
+            if s.name.startswith(prefix) and s.name[len(prefix):] in flt
+        ]
 
     async def execute(self, call: ToolCall, ctx: ToolCallContext) -> ToolResult:
         if not self._connected or self._session is None:

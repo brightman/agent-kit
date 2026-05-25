@@ -776,9 +776,16 @@ ADK / OpenHarness / baizhi-agent / fam-runtime **均无 lifecycle 枚举**:
 
 ```python
 class McpToolset(BaseToolset):
-    def __init__(self, config: McpServerConfig, *, secrets: dict[str, str] | None = None):
+    def __init__(
+        self,
+        config: McpServerConfig,
+        *,
+        secrets: dict[str, str] | None = None,
+        tool_filter: list[str] | Callable[[ToolSchema], bool] | None = None,
+    ):
         self._config = config        # ${VAR} 已在此处一次性替换完(§ 7.3)
         self.name = f"mcp__{config.name}"
+        self._tool_filter = tool_filter   # § 7.5.2
         self._session = None
         self._schemas: list[ToolSchema] = []
         self._connected = False
@@ -789,7 +796,8 @@ class McpToolset(BaseToolset):
         直接用 AgentLoop 的使用方需自己 `await toolset.connect()`。"""
 
     def build_schemas(self) -> list[ToolSchema]:
-        """返回 connect 时缓存的 schemas。未 connect 调用 raise RuntimeError。"""
+        """返回 connect 时缓存的 schemas,经 `tool_filter` 过滤(§ 7.5.2)。
+        未 connect 调用 raise RuntimeError。"""
 
     async def execute(self, call: ToolCall, ctx: ToolCallContext) -> ToolResult:
         """复用 self._session call tool,返回。
@@ -825,6 +833,34 @@ event loop 已经跑(Runner / 测试)的环境会直接 RuntimeError。
 **为什么不改 build_schemas 为 async**:那是 spec 的下游断点 —— Router / 所有
 现有 toolset / 所有现有测试都要跟着改。"explicit connect + runner pre-warm"
 是侵入面最小的方案,且符合 ADK 的 toolset awakening 范式。
+
+#### 7.5.2 `tool_filter` 选择性暴露 tool(Stage 5 修订 2026-05-24)
+
+**问题**:一个 MCP server 可能 advertise 10+ tools,但 agent 只需要其中
+几个(如 filesystem MCP 的 read_* 给只读 agent,write_* 给作者 agent;
+multi-tenant 上线只暴露允许的子集)。LLM 看见越多无关 tool,context 越
+大、选错越多。ADK 主推 `tool_filter`,我们对齐。
+
+**形态**:`McpToolset(cfg, tool_filter=...)`,接受:
+
+- `None`(默认):暴露全部 tools(原行为)
+- `list[str]`:**白名单**,按 remote tool name 匹配(不含 `mcp__<server>__`
+  前缀)。例:`tool_filter=["search", "fetch"]`
+- `Callable[[ToolSchema], bool]`:**谓词**,对每个 ToolSchema 调一次,
+  True 保留。例:`tool_filter=lambda s: not s.name.endswith("_write")`
+
+**实现位置**:`build_schemas()` 内部过滤(filter 是 ctor-bound,不依赖
+request,无需走 `build_schemas_for_request`)。Router 的命名冲突 / 路由
+表只看 build_schemas 暴露出来的子集 —— filtered-out tool **不会**进
+Router,LLM 也看不到。
+
+**`execute()` 不重复 check**:Router 只路由 advertised tools,filtered-out
+的 call 路由不到 McpToolset(Router 会返回 "unknown tool" error)。
+
+**未来更高级的 per-request 过滤**(per-tenant ACL / 按 user 角色):
+仍然走 `build_schemas_for_request(request)` override(spec § 5.4),
+跟 `tool_filter` 不冲突。`tool_filter` 是简单白名单,per-request 是动态
+策略 —— 两个都可以存在,filter 先生效,然后 per-request 再过一遍。
 
 ### 7.6 便利函数(可选)
 
