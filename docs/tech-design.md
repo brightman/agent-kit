@@ -1509,6 +1509,161 @@ skill script toolset。所有 sandbox/受限执行场景由上层组装。
 
 ---
 
+## 17. Agent 便利层 + Provider contrib(Stage 5 修订 2026-05-24)
+
+### 17.1 决策
+
+参考 ADK / openai-agents,加两层 **薄 convenience**,降低 hello-world boilerplate
+而不破坏底层契约。两层一起 + LiteLlm extras,等价的"4 行 ADK"现在 agent-kit
+也能 8 行写出。
+
+| 层 | 职责 | 放哪 |
+|---|---|---|
+| `Agent` class | bundle name + provider + instruction + tools + hooks/compactor/workspace_provider 这些 Runner ctor 参数;暴露 `run(message)` / `run_sync(message)` 一行调用 | `agent_kit/agent.py`,主包 export `from agent_kit import Agent` |
+| `LiteLlm` provider | 实现 `LlmProvider` Protocol,内部调 `litellm.acompletion`;支持 LiteLLM 路由的所有 model(`gemini/...`,`anthropic/...`,`openai/...`,`minimax/...`,等)| `agent_kit/contrib/providers/litellm.py`,**optional extras**(`pip install "agent-kit[litellm]"`) |
+
+### 17.2 Agent 契约
+
+```python
+from dataclasses import dataclass, field
+from pathlib import Path
+
+@dataclass
+class Agent:
+    name: str
+    model: LlmProvider | str                       # str → 走 LiteLlm(需 extras)
+    instruction: str = ""                          # → Runner.system_prelude
+    tools: list[BaseToolset] = field(default_factory=list)
+
+    # advanced:Runner 的其他 ctor 参数都暴露,默认值跟 Runner 一致
+    hooks: list[Hook] = field(default_factory=list)
+    compactor: ContextCompactor | None = None
+    workspace_provider: Callable[[RunRequest, str], Path] | None = None
+    workspace_root: Path = Path("/tmp/agent-kit-runs")
+    storage_root: Path = Path("./persistent")
+
+    # 默认的 per-run 参数(用 .run() 时不传就用这个,传了就 override)
+    default_max_rounds: int = 10
+    default_temperature: float = 0.7
+
+    # **故意没有 `default_tenant_id`**:tenant 是上层多租户应用的概念,不是
+    # agent 自身的固定属性。`run()` 方法签名里给 "default" 当 keyword 默认,
+    # 多租户使用方每次传
+
+    def __post_init__(self) -> None:
+        if isinstance(self.model, str):
+            self.model = self._resolve_string_model(self.model)
+        # 一次性构 Runner,跨多 .run() 复用(toolsets / provider 跨 run 状态保留)
+        self._runner = Runner(
+            provider=self.model, toolsets=self.tools,
+            system_prelude=self.instruction,
+            compactor=self.compactor, hooks=self.hooks,
+            workspace_root=self.workspace_root, storage_root=self.storage_root,
+            workspace_provider=self.workspace_provider,
+            default_max_rounds=self.default_max_rounds,
+        )
+
+    async def run(
+        self,
+        user_message: str,
+        *,
+        tenant_id: str = "default",                # 不 store 在 Agent 上
+        enabled_skills: list[str] | None = None,
+        max_rounds: int | None = None,
+        temperature: float | None = None,
+    ) -> RunResult: ...
+
+    def run_sync(self, user_message: str, **kwargs) -> RunResult:
+        """同 run(),但通过 Runner.run_sync 走 asyncio.run。FastAPI 里别用。"""
+
+    @staticmethod
+    def _resolve_string_model(model: str) -> LlmProvider:
+        """`from agent_kit.contrib.providers.litellm import LiteLlm` 失败 →
+        raise 友好 ImportError 提示装 extras 或传 LlmProvider 实例。"""
+
+    @property
+    def runner(self) -> Runner:
+        """advanced 用户拿底层 Runner 用 `run_to_completion(RunRequest(...))`
+        全自由。Agent 是 thin wrapper,Runner 永远在。"""
+```
+
+**故意不做的**(防止 Agent 滑坡成 ADK):
+
+| ADK 有 | agent-kit Agent 不做 | 理由 |
+|---|---|---|
+| `tools=[my_python_function]` 函数当工具(自动反射 signature)| 不做 | 用户写 `BaseToolset` 显式;反射魔法 YAGNI |
+| `tools=[other_agent]` sub-agent / handoff | 不做 | spec § 15 |
+| 内置 `google_search` / `web_search` tool | 不做 | spec § 1 边界;走 MCP |
+| Multimodal `Content` blocks | 不做 | Q3 决议 |
+| Sessions / Memory / 持久化 history | 不做 | spec § 15 |
+
+### 17.3 LiteLlm provider 契约
+
+```python
+class LiteLlm:
+    """`agent_kit.LlmProvider` 协议实现,内部 wrap LiteLLM.acompletion。
+
+    Examples:
+        LiteLlm("gemini/gemini-flash-latest")
+        LiteLlm("anthropic/claude-haiku-4-5", api_key="sk-...")
+        LiteLlm("openai/gpt-4o-mini")
+        LiteLlm("minimax/MiniMax-M2.7",
+                api_base="https://api.minimaxi.com/v1",
+                api_key="...")
+
+    Optional extras:`pip install "agent-kit[litellm]"`。装了再 import。
+    """
+    name: str                              # = "litellm:<model>"
+
+    def __init__(self, model: str, **litellm_kwargs):
+        # **litellm_kwargs 透传给 litellm.acompletion(api_key / api_base /
+        # custom_llm_provider / 等)。我们不重新发明 LiteLLM 的 API。
+
+    async def chat(
+        self,
+        messages: list[Message],
+        tools: list[ToolSchema] | None = None,
+        *, temperature: float = 0.7, max_tokens: int | None = None,
+    ) -> LlmResponse: ...
+        # 翻译 messages / tools → OpenAI 形态(LiteLLM 内部规范化);
+        # 调 litellm.acompletion;翻译 response.choices[0] → LlmResponse
+
+    async def chat_stream(self, *args, **kwargs):
+        raise NotImplementedError       # 跟 stream 推迟一致(spec § 14 Stage 7+)
+```
+
+### 17.4 等价的 "4 行 ADK" 在 agent-kit
+
+```python
+from agent_kit import Agent
+from agent_kit.mcp import McpServerConfig, McpToolset
+
+agent = Agent(
+    name="researcher",
+    model="gemini/gemini-flash-latest",
+    instruction="You help users research topics thoroughly.",
+    tools=[McpToolset(McpServerConfig(name="brave-search", transport="http",
+                                       url="...", headers={"X-Key": "${BRAVE_KEY}"}))],
+)
+print(agent.run_sync("What are the latest LLM benchmarks?").final_text)
+```
+
+跟 ADK 的 4 行差 4 行(MCP server config 显式 + 一个 print),但是
+**0 重依赖**(LiteLlm 在 extras 后面)+ **底层 Runner 完全暴露**(`agent.runner`
+访问)+ **多租户友好**(`tenant_id` 是 run-time 决定,不是 agent 属性)。
+
+### 17.5 测试覆盖范围
+
+- `tests/test_agent.py`:string-model resolution(litellm extras 装了 / 没装
+  两条路径)、`run` / `run_sync` 行为、`enabled_skills` / `max_rounds` /
+  `temperature` override、`agent.runner` 暴露、tenant_id default
+- `tests/contrib/test_providers_litellm.py`:`messages` → OpenAI 翻译、
+  `tools` → function 翻译、`response.choices[0]` → `LlmResponse` 反向翻译、
+  tool_calls 多个 / 空 / 部分文本混合、usage 字段映射;`@pytest.skip` if no
+  litellm
+
+---
+
 ## 附录 A · 设计依据反查
 
 | 设计点 | 来源 |
