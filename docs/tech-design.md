@@ -275,6 +275,48 @@ loop 后被 provider 400):
 - § 8.7 `ContextCompactor` Protocol(运行时压缩)— 跟 `prior_messages`
   正交:前者是 use site 给 fresh run 的 history,后者是 loop 内动态 compact
 
+#### 3.7.2 `cancel_check` 详解(2026-05-25 加,spec gap #2 修复)
+
+**形态**:`cancel_check: Callable[[], bool] | None = None`(默认 None)。
+
+**用途**:外部 poll-based cancel。loop 在两个点 poll:
+1. 每 round 顶部(provider.chat 之前)
+2. 每 tool dispatch 之前(同一 round 内多 tool 时,每个 tool 前各 poll 一次)
+
+返 `True` → emit `cancelled` event(payload `{"round": N, "reason": ...}`)+
+loop return。其中 `reason` 4 个 known values:
+
+| reason | 触发条件 |
+|---|---|
+| `external` | `ToolCallContext.cancel.is_set()`,round 顶部 check |
+| `external_mid_tool` | `ToolCallContext.cancel.is_set()`,tool dispatch 前 check |
+| `cancel_check` | `RunRequest.cancel_check()` returns True,round 顶部 |
+| `cancel_check_mid_tool` | `RunRequest.cancel_check()` returns True,tool dispatch 前 |
+
+**跟 `ToolCallContext.cancel` 的关系**:正交并存。两者顺序 check:`ctx.cancel`
+先(reason 用 `external` / `external_mid_tool`),`cancel_check` 后。同时
+触发 → `ctx.cancel` reason 胜出(更精确,因为它通常是 hook 内 set 的精准
+信号)。
+
+**两种用法分工**:
+- `ctx.cancel`(asyncio.Event):**in-loop / in-hook** cancel。hook 内 set
+  可以让 toolset 的 in-flight asyncio.task 立刻感知(通过 `await
+  ctx.cancel.wait()` 之类);per-tool 粒度,可以 reset 后再用
+- `cancel_check`(Callable):**外部 process / UI 按钮** cancel。loop 主动
+  poll,不要求 caller 维护 asyncio.Event 引用。典型场景:baizhi UI
+  "Cancel run" 按钮通过 closure capture run_id,application 层维护
+  `{run_id: cancel_flag}` dict,closure 读取
+
+**异常处理**:`cancel_check` raise → loop 吞掉 + 打 WARNING log(模块
+`agent_kit.loop`)+ treat as False(run 继续)。理由:`cancel_check` 是
+user code,频繁 poll(每 round + 每 tool),一次异常不该爆掉整 run;但
+不能 silent,日志让运维看见。
+
+**多 tool dispatch 行为**:同一 round 内 LLM 返多 tool_calls,loop 在**每个
+tool dispatch 前**都 poll 一次。所以:`cancel_check` 第 N 次 poll 返 True
+→ tool[N] 不执行,前面 N-1 个已经跑了。tool[N] 起的事件不发,直接 emit
+cancelled。
+
 ### 3.8 RunResult(Q4 决议:`run_to_completion` 返回)
 
 ```python

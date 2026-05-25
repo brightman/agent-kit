@@ -18,7 +18,7 @@ import time
 import traceback
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Callable
 
 from ._errors import unwrap_to_leaf
 from .context import ContextCompactor, _assert_tool_pairs_intact
@@ -27,6 +27,26 @@ from .provider import LlmProvider, LlmResponse, ToolSchema
 from .tokens import estimate_messages_tokens
 from .toolset import BaseToolset, ToolCallContext, ToolsetRouter
 from .types import Event, EventKind, Message, ToolCall, ToolResult
+
+
+def _check_request_cancel(cancel_check: Any) -> bool:
+    """安全调 RunRequest.cancel_check(可能 None / 抛异常)。
+
+    None → False。raise → 吞掉 + log + False(不让 caller bug 爆 run)。
+    设计:cancel_check 是 user code,在 loop 内每 round 频繁调,不能让一次
+    异常爆掉整个 run;但也不能 silent ——- log 让运维看见。
+    """
+    if cancel_check is None:
+        return False
+    try:
+        return bool(cancel_check())
+    except Exception:
+        import logging
+        logging.getLogger(__name__).warning(
+            "RunRequest.cancel_check raised; treating as False (run continues)",
+            exc_info=True,
+        )
+        return False
 
 
 @dataclass
@@ -77,6 +97,11 @@ class RunRequest:
     stream: bool = False                       # Q1 决议:opt-in stream(Stage 5)
     metadata: dict[str, Any] = field(default_factory=dict)
     prior_messages: list[Message] = field(default_factory=list)
+    cancel_check: Callable[[], bool] | None = None
+    # ↑ poll-based 外部 cancel:loop 在 round 边界 + tool dispatch 前调,True
+    #   → emit cancelled event(reason="cancel_check")+ return。spec § 3.7.2。
+    #   None(默认)= 不 poll。跟 ToolCallContext.cancel(asyncio.Event)正交
+    #   并存,两者任一触发都立刻 cancel。
 
     def __post_init__(self) -> None:
         if not self.prior_messages:
@@ -162,10 +187,19 @@ class AgentLoop:
         max_rounds = request.max_rounds or self._default_max_rounds
 
         for round_idx in range(max_rounds):
+            # 两路 cancel:asyncio.Event(in-tool 用)+ poll-based callable
+            # (外部用)。ctx.cancel 优先 check —— 一旦 hook 内 set 了,这条
+            # 路径 reason="external" 更精确;其次 poll cancel_check。
             if ctx.cancel.is_set():
                 yield self._mk_event(
                     last_round_start_id, "cancelled",
                     {"round": round_idx, "reason": "external"},
+                )
+                return
+            if _check_request_cancel(request.cancel_check):
+                yield self._mk_event(
+                    last_round_start_id, "cancelled",
+                    {"round": round_idx, "reason": "cancel_check"},
                 )
                 return
 
@@ -284,10 +318,17 @@ class AgentLoop:
             )
 
             for call in response.tool_calls:
+                # 同 round 顶部:两路 cancel,ctx.cancel 优先 reason。
                 if ctx.cancel.is_set():
                     yield self._mk_event(
                         round_start_id, "cancelled",
                         {"round": round_idx, "reason": "external_mid_tool"},
+                    )
+                    return
+                if _check_request_cancel(request.cancel_check):
+                    yield self._mk_event(
+                        round_start_id, "cancelled",
+                        {"round": round_idx, "reason": "cancel_check_mid_tool"},
                     )
                     return
 

@@ -15,7 +15,7 @@ agent-kit 是一个从 baizhi-agent / fam-runtime / ADK / OpenHarness 四家共�
 切片 D(LlmAgentRunner 内部全换 backend)全部 land 到 baizhi-agent 仓库;baizhi
 pytest 从 183 涨到 **298 全绿**(+78 新 adapter / backend / honesty 集成测试,
 0 regression)。切片 D 实现过程浮出 **4 个 spec gaps**(其中 #1 `prior_messages`
-**已修**,见下"## 已知 spec gaps")。
++ #2 `cancel_check` **已修**,见下"## 已知 spec gaps")。
 
 ---
 
@@ -221,7 +221,22 @@ re-run 时把 prior assistant reply embed 进**下一 attempt 的 user_message**
 - 加 tests:tool_calls in prior assistant message 也合法(为了 re-run 携带
   上一轮 tool_call/tool_result history)
 
-### Gap 2 · `ak.Runner.cancel(run_id)` 缺失 — **Maybe**
+### Gap 2 · 外部 cancel knob — ✅ **已修(2026-05-25)**
+
+**修复**:选 option A(`RunRequest.cancel_check: Callable[[], bool] | None`
+field)而不是 option B(`Runner.cancel(run_id)` + 内部 `_active_runs` dict)。
+loop 在 round 顶部 + tool dispatch 前 poll;True → emit `cancelled` event
+(reason `cancel_check` / `cancel_check_mid_tool`)+ return。跟现有
+`ToolCallContext.cancel`(asyncio.Event)正交并存。详见 tech-design § 3.7.2。
+9 个测试覆盖(`tests/test_cancel_check.py`)。
+
+**为啥不做 option B**:option A 是 thinner primitive,baizhi UI cancel 的
+"per-run run_id" 语义可以用 closure 在 application 层实现(`closure
+captures run_id, reads global cancel_flags dict`)。SDK 不需要 track active
+runs(那是 server-side machinery 层的责任,**不是** SDK 的)。后续如果
+2+ 使用方真的需要 by-run-id cancel API,再加 option B 作为 ergonomic 糖。
+
+下面问题描述保留作为 use-case 留痕,**不要再讨论实现方向**。
 
 baizhi 有 `RunnerRequest.cancel_check: Callable[[], bool]`,LlmAgentRunner
 旧 path 在每 round 边界 poll;UI 上"Cancel run"按钮通过 cancel_check 通知。
@@ -401,7 +416,8 @@ baizhi-agent 项目有 CODEX.md 约定 Claude × Codex 协作;agent-kit 目前**
 
 **切片 D 实施浮出 4 spec gaps**(见上"## 已知 spec gaps"段):
 1. ✅ `ak.RunRequest.prior_messages` 缺失 — **已修(2026-05-25)**,见 § 3.7.1
-2. `ak.Runner.cancel(run_id)` 缺失 — workaround:cancel_check 只在 attempts 之间 poll
+2. ✅ 外部 cancel knob — **已修(2026-05-25,option A)**,加
+   `RunRequest.cancel_check: Callable`,见 § 3.7.2
 3. `ak.RunRequest.max_tokens` 缺失 — silent loss(grep 0 处构造时设非 default)
 4. AgentLoop mid-loop callback 缺失 — workaround:baizhi outer wrap loop
 
@@ -432,4 +448,4 @@ git -C /Users/karama/Documents/baizhi/baizhi-agent log --oneline --decorate | he
 
 ---
 
-最后更新:2026-05-25,**Stage 5 切片 D 完成**(baizhi 仓库 7 个原子 PR;baizhi 测试 183 → 298 全绿)+ 4 个 spec gaps 反向记录(prior_messages / Runner.cancel / RunRequest.max_tokens / mid-loop callback)+ "切片进度" 表 / "切片 D 接力" 改写成实施记录 + 给新 agent 命令更新 + **gap #1 `prior_messages` 实施完毕**(`RunRequest.prior_messages` 字段 + 10 tests + § 3.7.1,ak 247 + 1 skipped)。
+最后更新:2026-05-25,**Stage 5 切片 D 完成**(baizhi 仓库 7 个原子 PR;baizhi 测试 183 → 298 全绿)+ 4 个 spec gaps 反向记录(prior_messages / Runner.cancel / RunRequest.max_tokens / mid-loop callback)+ "切片进度" 表 / "切片 D 接力" 改写成实施记录 + 给新 agent 命令更新 + **gap #1 `prior_messages` 实施完毕**(`RunRequest.prior_messages` 字段 + 10 tests + § 3.7.1,ak 247 + 1 skipped)+ **gap #2 `cancel_check` 实施完毕**(option A:`RunRequest.cancel_check: Callable` 字段 + 9 tests + § 3.7.2,ak 256 + 1 skipped)。
