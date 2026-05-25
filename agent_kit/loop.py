@@ -102,6 +102,9 @@ class RunRequest:
     #   → emit cancelled event(reason="cancel_check")+ return。spec § 3.7.2。
     #   None(默认)= 不 poll。跟 ToolCallContext.cancel(asyncio.Event)正交
     #   并存,两者任一触发都立刻 cancel。
+    max_tokens: int | None = None
+    # ↑ provider-side max_tokens cap(spec § 3.7.3,2026-05-25 加,gap #3 修复)。
+    #   None(默认)= provider 用自己 default。loop 每次 provider.chat 透传。
 
     def __post_init__(self) -> None:
         if not self.prior_messages:
@@ -275,6 +278,7 @@ class AgentLoop:
                     response = await self._provider.chat(
                         messages, tools_this_round,
                         temperature=request.temperature,
+                        max_tokens=request.max_tokens,
                     )
                 except Exception as exc:
                     yield self._mk_error("provider", exc, round_start_id)

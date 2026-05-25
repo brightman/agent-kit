@@ -317,6 +317,40 @@ tool dispatch 前**都 poll 一次。所以:`cancel_check` 第 N 次 poll 返 Tr
 → tool[N] 不执行,前面 N-1 个已经跑了。tool[N] 起的事件不发,直接 emit
 cancelled。
 
+#### 3.7.3 `max_tokens` 详解(2026-05-25 加,spec gap #3 修复)
+
+**形态**:`max_tokens: int | None = None`(默认 None)。
+
+**行为**:loop 每次 `provider.chat(...)` 调用时透传:
+
+```python
+response = await self._provider.chat(
+    messages, tools_this_round,
+    temperature=request.temperature,
+    max_tokens=request.max_tokens,
+)
+```
+
+None → provider 用自己 default(LiteLLM / Anthropic / OpenAI 各家 default
+通常 4096)。非 None → provider 按 caller 给的值。SDK **不替 caller 决策**
+合法范围(0 / 负数 / 巨大值 都如实传 —— provider/vendor 决定怎么 handle)。
+
+**为啥之前缺失**:历史 oversight。`LlmProvider` Protocol 早就定义了
+`max_tokens: int | None = None` 参数,但 `RunRequest` 没字段、loop 没传。
+caller 设 `RunRequest(...)` 时无 max_tokens 字段,只能 default(provider
+自己 default)。**baizhi 切片 D 实施时发现这条 "silent loss"**:
+`LlmAgentRunner(provider, toolsets, max_tokens=N)` 构造时设的 N 会**完全
+不生效**(adapter 收 None → baizhi.chat 用 default 1200)—— 调用方 grep
+0 处真用,所以无 impact,但 contract loss 修了才干净。
+
+**适用场景**:
+- eval grader prompt:限 max_tokens=200 省 cost
+- summarizer prompt:限 max_tokens=300-500 控成本
+- long-form skill(deepresearch):放开到 8000
+
+**配套测试**:`tests/test_max_tokens.py`(4 tests):default None 透传 /
+custom 512 透传 / multi-round 每次都透传 / max_tokens=0 edge case 如实传。
+
 ### 3.8 RunResult(Q4 决议:`run_to_completion` 返回)
 
 ```python

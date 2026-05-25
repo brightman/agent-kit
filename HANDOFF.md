@@ -14,8 +14,9 @@ agent-kit 是一个从 baizhi-agent / fam-runtime / ADK / OpenHarness 四家共�
 **Stage 5 baizhi 接入 ✅ 完成(2026-05-25)**:切片 A(类型 alias)+ 切片 B(McpToolset)+
 切片 D(LlmAgentRunner 内部全换 backend)全部 land 到 baizhi-agent 仓库;baizhi
 pytest 从 183 涨到 **298 全绿**(+78 新 adapter / backend / honesty 集成测试,
-0 regression)。切片 D 实现过程浮出 **4 个 spec gaps**(其中 #1 `prior_messages`
-+ #2 `cancel_check` **已修**,见下"## 已知 spec gaps")。
+0 regression)。切片 D 实现过程浮出 **4 个 spec gaps**(其中 **#1 prior_messages
++ #2 cancel_check + #3 max_tokens 已修**;只 #4 mid-loop callback **不修**
+因属 baizhi-specific policy,见下"## 已知 spec gaps")。
 
 ---
 
@@ -253,7 +254,13 @@ vs 旧 path —— 但旧 path 也只在 round 边界 check,不是真 mid-LLM ca
 - 或更简单:RunRequest.cancel_check: Callable | None,loop 内每 round 边界 poll
 - 后者 simpler 也更 baizhi-friendly
 
-### Gap 3 · `ak.RunRequest.max_tokens` 缺失 — **No(影响小)**
+### Gap 3 · `ak.RunRequest.max_tokens` 缺失 — ✅ **已修(2026-05-25)**
+
+**修复**:`agent_kit/loop.py::RunRequest` 加 `max_tokens: int | None = None`
+字段;`AgentLoop.run` provider.chat 调用透传 `max_tokens=request.max_tokens`。
+4 个测试(`tests/test_max_tokens.py`):default None / custom 512 / multi-round
+都透传 / 0 edge。tech-design § 3.7.3 documented。下面问题描述保留作为
+use-case 留痕。
 
 `ak.RunRequest` 没 max_tokens 字段;`AgentLoop` 调 `provider.chat(messages,
 tools, temperature=...)` 不传 max_tokens。baizhi `LlmProvider.chat(messages,
@@ -418,8 +425,9 @@ baizhi-agent 项目有 CODEX.md 约定 Claude × Codex 协作;agent-kit 目前**
 1. ✅ `ak.RunRequest.prior_messages` 缺失 — **已修(2026-05-25)**,见 § 3.7.1
 2. ✅ 外部 cancel knob — **已修(2026-05-25,option A)**,加
    `RunRequest.cancel_check: Callable`,见 § 3.7.2
-3. `ak.RunRequest.max_tokens` 缺失 — silent loss(grep 0 处构造时设非 default)
-4. AgentLoop mid-loop callback 缺失 — workaround:baizhi outer wrap loop
+3. ✅ `ak.RunRequest.max_tokens` 缺失 — **已修(2026-05-25)**,见 § 3.7.3
+4. AgentLoop mid-loop callback 缺失 — **不修**(baizhi-specific policy,
+   outer wrap loop 已经干净表达)
 
 ### ~~Stage 5 (原)~~ stream 实现
 **推迟到 Stage 7+**。理由 + 决策见 spec § 14 修订 2026-05-24。
@@ -448,4 +456,4 @@ git -C /Users/karama/Documents/baizhi/baizhi-agent log --oneline --decorate | he
 
 ---
 
-最后更新:2026-05-25,**Stage 5 切片 D 完成**(baizhi 仓库 7 个原子 PR;baizhi 测试 183 → 298 全绿)+ 4 个 spec gaps 反向记录(prior_messages / Runner.cancel / RunRequest.max_tokens / mid-loop callback)+ "切片进度" 表 / "切片 D 接力" 改写成实施记录 + 给新 agent 命令更新 + **gap #1 `prior_messages` 实施完毕**(`RunRequest.prior_messages` 字段 + 10 tests + § 3.7.1,ak 247 + 1 skipped)+ **gap #2 `cancel_check` 实施完毕**(option A:`RunRequest.cancel_check: Callable` 字段 + 9 tests + § 3.7.2,ak 256 + 1 skipped)。
+最后更新:2026-05-25,**Stage 5 切片 D 完成**(baizhi 仓库 7 个原子 PR;baizhi 测试 183 → 298 全绿)+ 4 个 spec gaps 反向记录(prior_messages / Runner.cancel / RunRequest.max_tokens / mid-loop callback)+ "切片进度" 表 / "切片 D 接力" 改写成实施记录 + 给新 agent 命令更新 + **3/4 spec gaps 实施完毕**:gap #1 `prior_messages` 字段 + 10 tests + § 3.7.1;gap #2 `cancel_check: Callable`(option A)+ 9 tests + § 3.7.2;gap #3 `max_tokens: int|None` + 4 tests + § 3.7.3。ak **260 + 1 skipped**。Gap #4 not-fixing 评估见已知 spec gaps 段。
