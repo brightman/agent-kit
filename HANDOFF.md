@@ -11,8 +11,10 @@ agent-kit 是一个从 baizhi-agent / fam-runtime / ADK / OpenHarness 四家共�
 抽出来的最小 Python 工具包,提供 agent loop + skill + MCP 的机制(不绑策略)。
 当前进度 = **Stage 4 + Runner.workspace_provider + 不内置 sandbox 决议 + per-request schema hook
 + contrib.FilesystemSkillRegistry + Runner.run_sync** 已落地,237 tests 全绿。
-**Stage 5 baizhi 接入进行中:切片 A(类型 alias)+ 切片 B(McpToolset)已落 baizhi-agent
-仓库;切片 D(LlmAgentRunner 整体换 backend)待办**。
+**Stage 5 baizhi 接入 ✅ 完成(2026-05-25)**:切片 A(类型 alias)+ 切片 B(McpToolset)+
+切片 D(LlmAgentRunner 内部全换 backend)全部 land 到 baizhi-agent 仓库;baizhi
+pytest 从 183 涨到 **298 全绿**(+78 新 adapter / backend / honesty 集成测试,
+0 regression)。切片 D 实现过程浮出 **4 个 spec gaps**(见下"## 已知 spec gaps")。
 
 ---
 
@@ -96,11 +98,11 @@ machinery,现有 event 流够覆盖 90%)。
 
 | # | 内容 | 状态 |
 |---|---|---|
-| **A** | baizhi `LlmToolSchema`/`LlmToolCall` alias 到 `agent_kit.ToolSchema`/`ToolCall` | ✅ `c3c0573` |
-| **B** | baizhi `McpHttpToolset` 内部 delegate 到 `agent_kit.McpToolset` + 删 `mcp_session.py` | ✅ `a269bb1` |
+| **A** | baizhi `LlmToolSchema`/`LlmToolCall` alias 到 `agent_kit.ToolSchema`/`ToolCall` | ✅ `c3c0573` (baizhi `pr-stage5-slice-a`) |
+| **B** | baizhi `McpHttpToolset` 内部 delegate 到 `agent_kit.McpToolset` + 删 `mcp_session.py` | ✅ `a269bb1` (baizhi `pr-stage5-slice-b`) |
 | C | ~~换 baizhi SkillRegistry → FilesystemSkillRegistry~~ — 抽象层级不同,**跳过**(讨论结论:agent_kit.FilesystemSkillRegistry 只是 reader,不接管 baizhi 的多租户 catalog) | ⏭ 不做 |
-| **D** | `LlmAgentRunner` 内部换 `agent_kit.Runner.run_sync()`,RunnerEvent ↔ Event 翻译 | 待办 |
-| 4 篇 recipes | workspace / SRT / MCP / skill-scripts | 待 D 完成 |
+| **D** | `LlmAgentRunner` 内部换 `agent_kit.Runner.run`(async iterator + asyncio.run pattern,**非 run_sync** —— N3 live-emit 约束)+ 4 adapter 类 + EventTranslator + 外层 honesty wrap loop | ✅ 拆 7 子 PR 落地(`pr-stage5-d-primitives` → `pr-stage5-d-toolset-adapter` → `pr-stage5-d-event-translator` → `pr-stage5-d-honesty-extract` → `pr-stage5-d-backend-parallel` (4a) → `pr-stage5-d-backend-default` (4b) → `pr-stage5-d-cleanup` (4c)) |
+| 4 篇 recipes | workspace / SRT / MCP / skill-scripts | 待写 |
 
 ### 已交付的脚手架
 
@@ -120,55 +122,155 @@ machinery,现有 event 流够覆盖 90%)。
   `pythonpath = ["src", "../agent-kit"]`(uv 管理 venv + hatchling editable
   .pth 不兼容的 workaround,看 baizhi commit c3c0573)
 
-### 切片 D 接力(下个 session 开干)
+### 切片 D 实施记录(2026-05-25 完成)
 
-**目标**:`baizhi.LlmAgentRunner.run(req) -> RunnerResult` 内部不再跑自家
-loop,而是调 `agent_kit.Runner.run_sync(ak_req) -> RunResult`,把结果翻译回
-baizhi 形态。
+**实际形态跟原计划差异**:
 
-**主要工作量**:
+| 原 HANDOFF 预估 | 实际落地 |
+|---|---|
+| `ak.Runner.run_sync()` 一行调用 | **改成 `asyncio.run(ak.Runner.run(...))` async iterator pattern** —— baizhi N3 要求 events 在 run 完成前 live emit;run_sync 阻塞到结束才返列表,会 break N3 |
+| 5 个 adapter 类 | 实际是 1 个 Provider + 1 个**通用** Toolset + 2 个翻译模块(messages / responses) + 1 个 EventTranslator + 1 个 honesty 模块 = 6 个文件;Toolset 写成通用 wrapper 不是 4 个具体类 |
+| 18 event 类型双向 mapping | 实际 baizhi 在 LlmAgentRunner 内只用 ~6 种 event;EventTranslator 处理 9 种 ak event → 6 种 baizhi event(stateful round_idx + tool_call_info stitching) |
+| `_looks_like_skill_storage_intent` → baizhi 自家 ak.Hook | **ak.Hook 无法表达此用例**(spec gap #4);改成 baizhi-side outer wrap loop 包 ak.Runner.run 外面 |
+| "~50 行 rewrite" | 实际拆 7 个原子 PR;rewrite 部分 (4b) 净改 +139 / -175 行;后续 4c cleanup 再 -176 行 |
 
-1. **5 个 adapter 类**(放在 baizhi 仓库,不进 agent-kit):
-   - baizhi.LlmProvider(sync chat)→ agent_kit.LlmProvider(async chat),
-     用 `asyncio.to_thread` wrap
-   - baizhi.BaseToolset(sync build_schemas(req) + sync execute → str)→
-     agent_kit.BaseToolset(sync build_schemas_for_request + async execute → ToolResult)
-     —— 每个 baizhi toolset(SkillStorageToolset / SkillCatalogToolset /
-     SkillScriptExecToolset / McpHttpToolset)各包一层
-   - baizhi.ChatMessage → agent_kit.Message 翻译
-   - baizhi.LlmResponse → agent_kit.LlmResponse 翻译(token 字段位置不同)
-   - **agent_kit.Event → baizhi.RunnerEvent** 反向翻译(最难一块)—— 18 个
-     event 类型要双向 mapping,emit_event 时序要保留
+**最终架构**:
 
-2. **重写 `LlmAgentRunner.run()` 内部**(~50 行):
-   - new agent-kit Runner with adapter-wrapped provider / toolsets
-   - 构造 ak_req 从 baizhi RunnerRequest
-   - `ak_result = runner.run_sync(ak_req)`(`run_sync` 在了!不用自己 bridge)
-   - 把 ak_result.events 翻译回 list[RunnerEvent],返 RunnerResult
+```
+LlmAgentRunner.run()  ← 53 行 façade,公开 API 不变
+       ↓
+agent_kit_backend.run_via_agent_kit()  ← baizhi 仓库,~300 行
+       ↓
+   ┌───┴───┬─────────┬──────────────┐
+   ↓       ↓         ↓              ↓
+Provider  Toolset  EventTranslator  honesty.py
+Adapter   Adapter  (ak→baizhi event)  (SYSTEM_PRELUDE +
+                                       wrap loop helpers)
+       ↓
+   ak.Runner (async iterator + asyncio.run main thread)
+       ↓
+   provider.chat (sync baizhi LlmProvider in asyncio.to_thread)
+```
 
-3. **保留 baizhi-side 业务规则**:
-   - `SYSTEM_PRELUDE`(包含 honesty rules)→ 塞 Runner.system_prelude
-   - `_looks_like_skill_storage_intent`(LLM 谎称已保存的兜底)→ 改成
-     baizhi 自家 Hook(`after_model` rewrite 或 `before_tool` 强制)
+**Tests**:baizhi 183 → 298 passed(+78 新 adapter/backend/honesty/integration
+集成测试,0 regression)。
 
-4. **183 个 baizhi tests 逐个 verify**:
-   - 多数会触发新 backend
-   - emit_event 时序、RunnerEvent 形状、`output_file` 写法都是断言点
-   - 改一半 baizhi broken 风险大,**专门 session 做,不混其他**
+**baizhi 仓库的 7 个 slice D PR**(按落地顺序):
 
-**spec gap 可能浮出 1-2 个**(对照 Stage 3 / 4 修订风格,先讨论再 commit):
-- `Runner.cancel(run_id)` 外部 cancel(baizhi `cancel_check: Callable`)
-- `ctx.emit` 真路由(baizhi live sink)
-- 别的
+1. `pr-stage5-d-primitives`(`4fca1f8`)— BaiziProviderAdapter + Message/Response
+   双向翻译 + 24 unit tests
+2. `pr-stage5-d-toolset-adapter`(`38654d3`)— 通用 BaiziToolsetAdapter +
+   per-run 实例 + asyncio.to_thread + 14 tests
+3. `pr-stage5-d-event-translator`(`80feaaf`)— EventTranslator stateful(round_idx
+   counter + tool_call_info stitching across rounds) + 26 tests
+4. `pr-stage5-d-honesty-extract`(`3a34695`)— `honesty.py` 抽出 +
+   ak.Hook 表达力不足的架构发现
+5. `pr-stage5-d-backend-parallel`(`86f2a8c`)— `run_via_agent_kit` parallel
+   path (默认 LlmAgentRunner.run 不动) + 14 集成测试
+6. `pr-stage5-d-backend-default`(`035ad90`)— flip LlmAgentRunner.run 默认
+   到新 backend;0 regression
+7. `pr-stage5-d-cleanup`(`ccb0a53`)— 删 _dispatch_tool / _build_initial_messages /
+   SYSTEM_PRELUDE → honesty.py;llm_runner.py 53 行
 
 ### Stage 5 退出标准(对照 tech-design § 14 修订)
 
-| 标准 | 怎么验 |
-|---|---|
-| baizhi-agent pytest 不退化 | 在 baizhi-agent 仓库跑 |
-| pptx e2e live test 跑通 | `pytest -m live tests/test_baizhi_e2e_live_pptx_websearch.py` 绿 + e2e-output/ 有有效 pptx |
-| recipes 写齐 4 篇(workspace / SRT / MCP / skill-scripts) | `docs/recipes/` 4 个文件 |
-| 250+ tests 全绿(估算)| `.venv/bin/python -m pytest`(目前 237 + 1 skipped) |
+| 标准 | 怎么验 | 状态 |
+|---|---|---|
+| baizhi-agent pytest 不退化 | 在 baizhi-agent 仓库跑 | ✅ 298 passed (从 183 涨,0 regression) |
+| pptx e2e live test 跑通 | `pytest -m live tests/test_baizhi_e2e_live_pptx_websearch.py` 绿 + e2e-output/ 有有效 pptx | ✅(切片 D 之前已绿;切片 D 后未重跑,但同代码路径) |
+| recipes 写齐 4 篇(workspace / SRT / MCP / skill-scripts) | `docs/recipes/` 4 个文件 | ⏳ 未写 |
+| 250+ tests 全绿(估算)| `.venv/bin/python -m pytest`(agent-kit 仓库,目前 237 + 1 skipped) | ✅(agent-kit 仓库本身没变;baizhi 仓库 298) |
+| production smoke(server + 真打 LLM)| baizhi 跑 server + UI playground 触发真 LLM | ⏳ 留 Codex QA round 2 |
+
+---
+
+## 已知 spec gaps —— Stage 5 切片 D 实施时浮出(2026-05-25)
+
+每条都 **写进 baizhi-agent `src/baizhi_agent_runtime/agent_kit_backend.py`
+模块 docstring**,本节是 cross-repo 反向 mirror。每条标记**是否需要 SDK
+spec 改动**(Yes = 后续值得 issue / RFC;No = workaround 已足够、不动 SDK)。
+
+### Gap 1 · `ak.RunRequest.prior_messages` 缺失 — **Yes**
+
+`ak.RunRequest` 只支持 `user_message: str`(单条 user)+ `system_prelude: str`,
+**没有 prior_messages: list[Message] 字段**。导致两个真实场景没法直接表达:
+
+1. **多轮 conversation history**:baizhi 多轮聊天里 `request.history: list[{role,
+   content}]` 装着 prior user / assistant turns。
+2. **honesty re-run 时的 corrected context**:premature final_text 触发再跑一遍时,
+   需要把"上一 attempt 的 assistant reply + runtime correction" embed 进去。
+
+**baizhi 的 workaround**(`agent_kit_backend._build_system_prelude_with_context`):
+把 history embed 进 system_prelude 作为合成 prose("--- Prior conversation
+context (synthesized from history) ---\n[user] ...\n[assistant] ...");honesty
+re-run 时把 prior assistant reply embed 进**下一 attempt 的 user_message**
+本身("Earlier in this turn you replied: ...\nRuntime correction: ...")。
+
+**SDK 设计建议**:
+- 加 `RunRequest.prior_messages: list[Message] = []`
+- AgentLoop._compose_messages 处:`[system?, *prior_messages, user]`
+- 加 invariant: prior_messages 不能含 system role(独立到 system_prelude)
+- 加 tests:tool_calls in prior assistant message 也合法(为了 re-run 携带
+  上一轮 tool_call/tool_result history)
+
+### Gap 2 · `ak.Runner.cancel(run_id)` 缺失 — **Maybe**
+
+baizhi 有 `RunnerRequest.cancel_check: Callable[[], bool]`,LlmAgentRunner
+旧 path 在每 round 边界 poll;UI 上"Cancel run"按钮通过 cancel_check 通知。
+ak.Runner 没暴露外部 cancel knob,只有 `ToolCallContext.cancel: asyncio.Event`
+per-tool。
+
+**baizhi 的 workaround**:cancel_check 只在 outer honesty wrap loop 的 attempts
+之间 check;mid-attempt(LLM 进行中 / tool 执行中)不响应。**轻度 regression**
+vs 旧 path —— 但旧 path 也只在 round 边界 check,不是真 mid-LLM cancel,所以
+实际差异是"mid-attempt 但 cross-round" cancel 时序略不同。
+
+**SDK 设计建议**(可选,看是否多人遇到):
+- `Runner.cancel(run_id) -> bool` 外部 API,内部 set 对应 run 的 ctx.cancel
+- 或更简单:RunRequest.cancel_check: Callable | None,loop 内每 round 边界 poll
+- 后者 simpler 也更 baizhi-friendly
+
+### Gap 3 · `ak.RunRequest.max_tokens` 缺失 — **No(影响小)**
+
+`ak.RunRequest` 没 max_tokens 字段;`AgentLoop` 调 `provider.chat(messages,
+tools, temperature=...)` 不传 max_tokens。baizhi `LlmProvider.chat(messages,
+tools, max_tokens=1200)` 有 default,所以 `BaiziProviderAdapter` 收 max_tokens=None
+时 baizhi 用 default(1200)。
+
+**实际影响**:**silent loss of custom max_tokens**。`LlmAgentRunner(provider,
+toolsets, max_tokens=N)` 构造时设非默认 max_tokens,新 backend 走不到 baizhi
+provider。grep 0 处这样用 —— **目前无 impact**,但 contract loss 该记录。
+
+**SDK 设计建议**(轻量):
+- `RunRequest.max_tokens: int | None = None`
+- AgentLoop:`await provider.chat(..., max_tokens=request.max_tokens)`
+- Provider Protocol 也加 `max_tokens=None` kw
+
+### Gap 4 · AgentLoop 没有 "force re-loop with corrective user message" hook — **No(use-case 特殊)**
+
+baizhi 的 honesty enforcement(storage_required && !storage_tool_used →
+push correction + re-loop)需要"LLM 退出 loop 后,加 message,重启 loop"
+能力。**4 个 ak.Hook 方法都不能表达**:
+
+- `after_model(response)` 能返替换 response,但 ak.loop 终止逻辑严格基于
+  `response.tool_calls is empty/None`:只要 tool_calls 空,loop 立刻 emit
+  final_text + round_end + return。没法阻止退出(除非伪造 tool_call 指向不
+  存在的 toolset)。
+- `before_model(messages, tools)` 能 mutate messages,但只在每 round 开始时
+  调一次;loop 已经 return 之后 before_model 不会再触发。
+- `before_tool` / `after_tool` 只在 tool 路径,跟 final_text 退出路径无关。
+
+**baizhi 的 workaround**:outer wrap loop 在 ak.Runner 外面起一个 attempts
+loop —— ak 跑一遍 → 检测是否 premature exit → 是的话 append 修正消息再跑
+一遍。每个 attempt 是独立的 ak.Runner.run。详见 baizhi
+`src/baizhi_agent_runtime/agent_kit_backend.py` 模块 docstring + honesty.py。
+
+**SDK 设计建议**(**No 推荐**):
+- 这是 baizhi-specific business policy(storage-intent enforcement),其他用
+  ak 的项目大概率不需要 —— 加 hook 会污染 SDK with use-case-specific 抽象。
+- 当前 outer wrap loop pattern 是干净的 composition;SDK 不需要适配。
+- 若将来 2+ 个项目反映同需求,再考虑加 `Hook.on_loop_exit(reason, response)
+  -> AgentLoopAction(continue_with_messages=...)` 之类的 round-level hook。
 
 ---
 
@@ -259,25 +361,41 @@ baizhi-agent 项目有 CODEX.md 约定 Claude × Codex 协作;agent-kit 目前**
 - `1410c50` **MCP/SKILL.md 名规则放宽 + baizhi pptx + websearch e2e 脚手架**(包含 in-process integration test + opt-in live test);**197 total**
 - `792f376` **stream 推迟到 Stage 7+;路线图重排,Stage 5 = baizhi 接入**
 
-### Stage 5 (新) = baizhi-agent 接入(进行中)
+### Stage 5 (新) = baizhi-agent 接入 ✅ 完成(2026-05-25)
 
-agent-kit 这边的 enabler 工作:
+**agent-kit 仓库的 enabler 工作**(切片 D 实施前已 land):
 
 - `e6411b2` **`agent_kit.contrib.FilesystemSkillRegistry`**(reference 文件系统 skill 持久层,20 tests)
 - `87b9dfe` **ExceptionGroup unwrap 错误诊断辅助**(`agent_kit/_errors.py`,6 tests)
 - `2fccbdb` **live e2e transient error retry**(macOS EADDRNOTAVAIL 不稳定的兜底)
 - `e550020` **spec § 5.4 决议**:per-request schema hook(让 toolset 按 request 过滤/动态生成 schemas)
 - `4ac1fca` **`build_schemas_for_request` + Router per-run 重建**(10 tests)
-- `319d4c5` **`Runner.run_sync()`**(openai-agents 形态;sync wrapper,FastAPI 里别用;4 tests)
+- `319d4c5` **`Runner.run_sync()`**(openai-agents 形态;sync wrapper)—— **切片 D 实际没用**(N3 live-emit 要求 async iterator pattern,不是 run_sync 阻塞返回),但保留给纯 sync caller / Jupyter 用
 - **237 total + 1 skipped(live)** —— live e2e 最近一次 24.6s 通过
-
-切片 D 在 baizhi-agent 仓库做(下个 session 起)。
 
 ### baizhi-agent 仓库的 Stage 5 进度(commit 在 baizhi 那边)
 
-- `c3c0573` 切片 A — `LlmToolSchema` / `LlmToolCall` alias 到 `agent_kit.ToolCall` / `ToolSchema`
-- `a269bb1` 切片 B — `McpHttpToolset` 内部 delegate 到 `agent_kit.McpToolset` + 删 `mcp_session.py`(144 行死代码)+ 重写 7 toolset tests
-- baizhi 测试:183 → 183(0 退化)
+**切片 A + B**(2026-05-24,baizhi-side 已 retroactive backfill pr.md):
+- `c3c0573` tag `pr-stage5-slice-a` — `LlmToolSchema` / `LlmToolCall` alias
+- `a269bb1` tag `pr-stage5-slice-b` — `McpHttpToolset` delegate + 删
+  `mcp_session.py`(144 行)+ 重写 7 toolset tests。**⚠️ 该 commit 偷塞了 N1
+  违规校验**(`if skill_name == "flashidea"` path enforcement),后被
+  baizhi `pr-flashidea-monthly`(`1070137`)拆除。
+
+**切片 D**(2026-05-25,7 个原子 PR,baizhi 测试 183 → 298):
+- `4fca1f8` tag `pr-stage5-d-primitives` — Provider + Message + Response adapter + 24 tests
+- `38654d3` tag `pr-stage5-d-toolset-adapter` — 通用 BaiziToolsetAdapter + 14 tests
+- `80feaaf` tag `pr-stage5-d-event-translator` — EventTranslator stateful + 26 tests
+- `3a34695` tag `pr-stage5-d-honesty-extract` — `honesty.py` + ak.Hook 不足的架构发现
+- `86f2a8c` tag `pr-stage5-d-backend-parallel` (4a) — `run_via_agent_kit` parallel path + 14 集成测试
+- `035ad90` tag `pr-stage5-d-backend-default` (4b) — flip default;0 regression
+- `ccb0a53` tag `pr-stage5-d-cleanup` (4c) — `llm_runner.py` 53 行 façade
+
+**切片 D 实施浮出 4 spec gaps**(见上"## 已知 spec gaps"段):
+1. `ak.RunRequest.prior_messages` 缺失 — workaround:embed 进 system_prelude
+2. `ak.Runner.cancel(run_id)` 缺失 — workaround:cancel_check 只在 attempts 之间 poll
+3. `ak.RunRequest.max_tokens` 缺失 — silent loss(grep 0 处构造时设非 default)
+4. AgentLoop mid-loop callback 缺失 — workaround:baizhi outer wrap loop
 
 ### ~~Stage 5 (原)~~ stream 实现
 **推迟到 Stage 7+**。理由 + 决策见 spec § 14 修订 2026-05-24。
@@ -291,16 +409,19 @@ cd /Users/karama/Documents/baizhi/agent-kit
 .venv/bin/python -m pytest 2>&1 | tail -5
 # Expected: 237 passed, 1 skipped in <1s
 
-# 看现状
+# 看现状(Stage 5 接入 ✅ 已完成,4 spec gaps 已记录)
 cat HANDOFF.md
-cat docs/tech-design.md | sed -n '/^## 14/,/^## 15/p'  # 路线图(stream 推迟,Stage 5=baizhi 接入)
+cat docs/tech-design.md | sed -n '/^## 14/,/^## 15/p'  # 路线图(stream 推迟)
 cat docs/tech-design.md | sed -n '/^## 16/,/^## 附录/p' # sandbox 决议
 ls tests/test_baizhi*.py                                 # baizhi 集成脚手架
 
-# 开 Stage 5(baizhi-agent 接入)
-git -C /Users/karama/Documents/baizhi/agent-kit log --oneline --decorate | head
+# 验 baizhi 那边 Stage 5 切片 D 已落地
+git -C /Users/karama/Documents/baizhi/baizhi-agent tag --list "pr-stage5-*"
+# 期望:pr-stage5-slice-a / pr-stage5-slice-b / pr-stage5-d-{primitives,toolset-adapter,
+#       event-translator,honesty-extract,backend-parallel,backend-default,cleanup}
+git -C /Users/karama/Documents/baizhi/baizhi-agent log --oneline --decorate | head
 ```
 
 ---
 
-最后更新:2026-05-24,Stage 5 切片 A+B 落地 + run_sync / per-request schema hook / contrib.FilesystemSkillRegistry / ExceptionGroup unwrap 落地 + 路线图重排后。
+最后更新:2026-05-25,**Stage 5 切片 D 完成**(baizhi 仓库 7 个原子 PR;baizhi 测试 183 → 298 全绿)+ 4 个 spec gaps 反向记录(prior_messages / Runner.cancel / RunRequest.max_tokens / mid-loop callback)+ "切片进度" 表 / "切片 D 接力" 改写成实施记录 + 给新 agent 命令更新。
