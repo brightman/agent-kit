@@ -7,6 +7,7 @@ from __future__ import annotations
 
 __version__ = "0.0.0"
 
+from .agent import Agent
 from .context import ContextCompactor, TruncatingCompactor
 from .hooks import Hook
 from .loop import AgentLoop, RunRequest
@@ -62,4 +63,6 @@ __all__ = [
     "RunRequest",
     "Runner",
     "RunResult",
+    # agent(便利层,spec § 17)
+    "Agent",
 ]
