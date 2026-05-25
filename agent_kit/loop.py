@@ -31,7 +31,41 @@ from .types import Event, EventKind, Message, ToolCall, ToolResult
 
 @dataclass
 class RunRequest:
-    """一次 run 的输入。"""
+    """一次 run 的输入。
+
+    ## prior_messages(spec § 3.x,2026-05-25 加)
+
+    多轮对话场景把**已经发生过**的 user / assistant / tool turns 喂进 fresh
+    `Runner.run()`,让 LLM 看到完整 conversation history。典型用法两种:
+
+    1. **多轮 chat history**:每个新 user turn 把过去几轮 messages 作为
+       `prior_messages` 一起传,user_message 是这一轮新的输入
+    2. **honesty / correction re-run**:LLM 上一轮 final_text 不达标(比如
+       baizhi storage-intent 检测),把上一轮 `assistant(text)` 塞进
+       `prior_messages`,`user_message` 写 "runtime correction: ..." 再跑一遍
+
+    **不在 SDK scope** 的两件事(留 use site policy):
+    - history 压缩 / 摘要 / 滑动窗口 cutoff —— 选哪个 LLM 摘要、cutoff 多少、
+      失败 fallback 啥,都是 product 决策,SDK 不绑。需要的可以用
+      `ContextCompactor`(loop 内自动 compact) 或 use site 在构造 RunRequest
+      前自己跑 `compress(history) → prior_messages`
+    - 多模态 content block —— prior_messages 跟 user_message 一样,Stage 0-5
+      维持 `str` content(spec Q3 决议)
+
+    ## Invariants(__post_init__ 校验)
+
+    - `prior_messages` 不能含 `role="system"` —— system 走 `system_prelude` 或
+      `Runner(system_prelude=...)`,独立到 conversation history 之外。塞进
+      prior_messages 会让 _compose_messages 出现两个 system message,违反
+      OpenAI/Anthropic wire format
+    - tool_call ↔ tool_result 配对完整(context.py `_assert_tool_pairs_intact`):
+      每个 `role="tool"` 的 message 必须有 prior `role="assistant"` 含同 id 的
+      tool_call。orphan tool message → ValueError 构造时就挂,不让脏 history
+      进 loop 后被 provider 400
+    - 末尾如果是 `assistant + tool_calls`,后面必须紧跟对应的 tool messages
+      (否则下一轮 LLM 会看见"我刚 call 了 tool 但没结果",大多 vendor 会
+      拒绝);上面的 _assert_tool_pairs_intact 顺便覆盖
+    """
 
     tenant_id: str
     agent_id: str
@@ -42,6 +76,20 @@ class RunRequest:
     system_prelude: str = ""
     stream: bool = False                       # Q1 决议:opt-in stream(Stage 5)
     metadata: dict[str, Any] = field(default_factory=dict)
+    prior_messages: list[Message] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if not self.prior_messages:
+            return
+        for i, m in enumerate(self.prior_messages):
+            if m.role == "system":
+                raise ValueError(
+                    f"prior_messages[{i}] has role='system'; system content must "
+                    "go into RunRequest.system_prelude or Runner(system_prelude=...). "
+                    "Loop will only emit one system message at the head."
+                )
+        # tool_call ↔ tool_result 配对完整;复用 context.py 的 SDK 兜底实现
+        _assert_tool_pairs_intact(self.prior_messages)
 
 
 def _new_event_id() -> str:
@@ -309,10 +357,14 @@ class AgentLoop:
     # ---- helpers ----
 
     def _compose_messages(self, request: RunRequest) -> list[Message]:
-        """初始 messages = optional system + user message。
+        """初始 messages = optional system + prior_messages + user message。
+
+        顺序: `[system?, *prior_messages, user]`(spec § 3.x)
 
         skill catalog 注入由 Runner(Stage 3)负责拼进 system_prelude,
-        AgentLoop 只用 prelude 字符串本身。
+        AgentLoop 只用 prelude 字符串本身。prior_messages 的校验
+        (no system role / tool-pair invariant)在 `RunRequest.__post_init__`
+        构造时已经跑过,这里直接 splice。
         """
         prelude_parts: list[str] = []
         if self._prelude:
@@ -322,6 +374,7 @@ class AgentLoop:
         out: list[Message] = []
         if prelude_parts:
             out.append(Message(role="system", content="\n\n".join(prelude_parts)))
+        out.extend(request.prior_messages)
         out.append(Message(role="user", content=request.user_message))
         return out
 

@@ -14,7 +14,8 @@ agent-kit 是一个从 baizhi-agent / fam-runtime / ADK / OpenHarness 四家共�
 **Stage 5 baizhi 接入 ✅ 完成(2026-05-25)**:切片 A(类型 alias)+ 切片 B(McpToolset)+
 切片 D(LlmAgentRunner 内部全换 backend)全部 land 到 baizhi-agent 仓库;baizhi
 pytest 从 183 涨到 **298 全绿**(+78 新 adapter / backend / honesty 集成测试,
-0 regression)。切片 D 实现过程浮出 **4 个 spec gaps**(见下"## 已知 spec gaps")。
+0 regression)。切片 D 实现过程浮出 **4 个 spec gaps**(其中 #1 `prior_messages`
+**已修**,见下"## 已知 spec gaps")。
 
 ---
 
@@ -190,7 +191,14 @@ Adapter   Adapter  (ak→baizhi event)  (SYSTEM_PRELUDE +
 模块 docstring**,本节是 cross-repo 反向 mirror。每条标记**是否需要 SDK
 spec 改动**(Yes = 后续值得 issue / RFC;No = workaround 已足够、不动 SDK)。
 
-### Gap 1 · `ak.RunRequest.prior_messages` 缺失 — **Yes**
+### Gap 1 · `ak.RunRequest.prior_messages` 缺失 — ✅ **已修(2026-05-25)**
+
+**修复**:`agent_kit/loop.py::RunRequest` 加 `prior_messages: list[Message]
+= field(default_factory=list)` 字段 + `__post_init__` 校验(no system role,
+tool-pair invariant)+ `AgentLoop._compose_messages` splice 成 `[system?,
+*prior_messages, user]`。10 个测试覆盖 (`tests/test_prior_messages.py`)。
+tech-design § 3.7.1 documented。下面问题描述保留作为设计依据 + use-case
+留痕,**不要再讨论实现方向**。
 
 `ak.RunRequest` 只支持 `user_message: str`(单条 user)+ `system_prelude: str`,
 **没有 prior_messages: list[Message] 字段**。导致两个真实场景没法直接表达:
@@ -392,7 +400,7 @@ baizhi-agent 项目有 CODEX.md 约定 Claude × Codex 协作;agent-kit 目前**
 - `ccb0a53` tag `pr-stage5-d-cleanup` (4c) — `llm_runner.py` 53 行 façade
 
 **切片 D 实施浮出 4 spec gaps**(见上"## 已知 spec gaps"段):
-1. `ak.RunRequest.prior_messages` 缺失 — workaround:embed 进 system_prelude
+1. ✅ `ak.RunRequest.prior_messages` 缺失 — **已修(2026-05-25)**,见 § 3.7.1
 2. `ak.Runner.cancel(run_id)` 缺失 — workaround:cancel_check 只在 attempts 之间 poll
 3. `ak.RunRequest.max_tokens` 缺失 — silent loss(grep 0 处构造时设非 default)
 4. AgentLoop mid-loop callback 缺失 — workaround:baizhi outer wrap loop
@@ -424,4 +432,4 @@ git -C /Users/karama/Documents/baizhi/baizhi-agent log --oneline --decorate | he
 
 ---
 
-最后更新:2026-05-25,**Stage 5 切片 D 完成**(baizhi 仓库 7 个原子 PR;baizhi 测试 183 → 298 全绿)+ 4 个 spec gaps 反向记录(prior_messages / Runner.cancel / RunRequest.max_tokens / mid-loop callback)+ "切片进度" 表 / "切片 D 接力" 改写成实施记录 + 给新 agent 命令更新。
+最后更新:2026-05-25,**Stage 5 切片 D 完成**(baizhi 仓库 7 个原子 PR;baizhi 测试 183 → 298 全绿)+ 4 个 spec gaps 反向记录(prior_messages / Runner.cancel / RunRequest.max_tokens / mid-loop callback)+ "切片进度" 表 / "切片 D 接力" 改写成实施记录 + 给新 agent 命令更新 + **gap #1 `prior_messages` 实施完毕**(`RunRequest.prior_messages` 字段 + 10 tests + § 3.7.1,ak 247 + 1 skipped)。

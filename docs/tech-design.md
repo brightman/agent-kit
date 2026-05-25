@@ -230,7 +230,50 @@ class RunRequest:
     stream: bool = False         # Q1 决议:opt-in
     metadata: dict[str, Any] = field(default_factory=dict)
     # ↑ 透传给 Event payload 的 `request_metadata` 字段(给上层做关联)
+    prior_messages: list[Message] = field(default_factory=list)
+    # ↑ 已经发生过的 user/assistant/tool turns(spec § 3.7.1,2026-05-25 加)
 ```
+
+#### 3.7.1 `prior_messages` 详解(2026-05-25 加)
+
+**形态**:`list[Message]` —— 跟 loop 内部 messages 同形 (`Message(role, content,
+tool_calls?, tool_call_id?)`)。**默认空 list**。
+
+**用途**(两类):
+1. **多轮 chat history**:每个新 user turn 把过去几轮 messages 作为
+   `prior_messages` 一起传,`user_message` 是这一轮新的输入
+2. **honesty / correction re-run**:LLM 上一轮 final_text 不达标,把上一轮
+   `assistant(text)` 塞进 `prior_messages`,`user_message` 写
+   `"runtime correction: ..."` 再跑一遍(baizhi-agent 实测路径,见
+   baizhi `agent_kit_backend.py`)
+
+**Compose 顺序**:`_compose_messages` 把消息组成 `[system?, *prior_messages, user]`。
+
+**Invariants**(`RunRequest.__post_init__` 校验,构造时挂,不让脏 history 进
+loop 后被 provider 400):
+- `prior_messages` 不能含 `role="system"` —— system 走 `system_prelude` 或
+  `Runner(system_prelude=...)`,独立到 conversation history 之外
+- `tool_call ↔ tool_result` 配对完整(复用 `context.py::_assert_tool_pairs_intact`):
+  每个 `role="tool"` 的 message 必须有 prior `role="assistant"` 含同 id 的
+  tool_call
+- 末尾如果是 `assistant + tool_calls`,后面必须紧跟对应的 tool messages
+  (上面那条 invariant 顺便覆盖)
+
+**Out of scope**(use site policy,SDK 不绑):
+- **history 压缩 / 摘要 / 滑动窗口 cutoff** —— 选哪个 LLM 摘要、cutoff 多少、
+  失败 fallback,都是 product 决策。需要的可以:
+  1. use site 在构造 `RunRequest` 前自己跑 `compress(history) → prior_messages`
+     (典型:slide window keep recent N + summarize older,见 baizhi-agent
+     `baizhi_agent_runtime/history.py`)
+  2. 或者用 `ContextCompactor`(loop 内 every-round 自动 compact,内置
+     `TruncatingCompactor` 零 LLM 成本)
+- **多模态 content block** —— Stage 0-5 维持 `str` content(Q3 决议),跟
+  `user_message` / loop 内部 messages 同步演进
+
+**spec 关联**:
+- § 11.c `_assert_tool_pairs_intact` 实现 + 边界用例
+- § 8.7 `ContextCompactor` Protocol(运行时压缩)— 跟 `prior_messages`
+  正交:前者是 use site 给 fresh run 的 history,后者是 loop 内动态 compact
 
 ### 3.8 RunResult(Q4 决议:`run_to_completion` 返回)
 
