@@ -1702,31 +1702,85 @@ class LiteLlm:
 
 ```python
 from agent_kit import Agent
-from agent_kit.mcp import McpServerConfig, McpToolset
+from agent_kit.mcp import McpToolset
 
 agent = Agent(
     name="researcher",
     model="gemini/gemini-flash-latest",
     instruction="You help users research topics thoroughly.",
-    tools=[McpToolset(McpServerConfig(name="brave-search", transport="http",
-                                       url="...", headers={"X-Key": "${BRAVE_KEY}"}))],
+    skills="./skills",                                   # ← 自动 catalog,默认全列
+    tools=[McpToolset.http("brave", url="...",
+                            headers={"X-Key": "${BRAVE_KEY}"})],
 )
-print(agent.run_sync("What are the latest LLM benchmarks?").final_text)
+print(agent.run_sync("...").final_text)
 ```
 
-跟 ADK 的 4 行差 4 行(MCP server config 显式 + 一个 print),但是
-**0 重依赖**(LiteLlm 在 extras 后面)+ **底层 Runner 完全暴露**(`agent.runner`
-访问)+ **多租户友好**(`tenant_id` 是 run-time 决定,不是 agent 属性)。
+跟 ADK 的 4 行差 ~3 行(MCP server config + 1 个 print);**0 重依赖**
+(LiteLlm 在 extras 后面)+ **底层 Runner 完全暴露**(`agent.runner` 访问)
++ **per-Agent 多租户**(每个 tenant new 一份 Agent)+ **skill catalog 一行接入**。
 
 ### 17.5 测试覆盖范围
 
 - `tests/test_agent.py`:string-model resolution(litellm extras 装了 / 没装
   两条路径)、`run` / `run_sync` 行为、`enabled_skills` / `max_rounds` /
-  `temperature` override、`agent.runner` 暴露、tenant_id default
+  `temperature` override、`agent.runner` 暴露
+- `tests/test_agent_skills.py`:`skills=` 入口 4 形态、自动 enable / 显式
+  覆盖 / 显式空、`DEFAULT_SKILLS_GUIDANCE` 默认 / "" 禁用 / 自定义、
+  `InMemorySkillRegistry` 契约
 - `tests/contrib/test_providers_litellm.py`:`messages` → OpenAI 翻译、
   `tools` → function 翻译、`response.choices[0]` → `LlmResponse` 反向翻译、
   tool_calls 多个 / 空 / 部分文本混合、usage 字段映射;`@pytest.skip` if no
   litellm
+
+### 17.6 Agent.skills 简写 + DEFAULT_SKILLS_GUIDANCE(Stage 5 修订 2026-05-26)
+
+参考 openai-agents `Skills` capability(`sandbox/capabilities/skills.py`)
+做了**3 处对齐**(其他刻意不抄):
+
+**对齐 1:`skills=` 接受多形态源**
+
+```python
+Agent(skills=None)                            # 无 catalog
+Agent(skills=Path("./skills"))                # → FilesystemSkillRegistry
+Agent(skills="./skills")                      # 同上(str)
+Agent(skills=my_registry)                     # SkillRegistry 实例直传
+Agent(skills=[Skill(...), Skill(...)])        # → InMemorySkillRegistry
+```
+
+非 None 时,Agent 自动 append 一个 `SkillCatalogToolset(registry)` 到 tools 末尾。
+
+**对齐 2:默认 enable 全部(没有 `default_enabled_skills`)**
+
+openai-agents `Skills.instructions()` 总是列**全部** skill metadata,LLM 通过
+`$SkillName` trigger / 任务描述匹配自选。我们对齐:
+
+```python
+agent.run("...")                       # enabled_skills=None → 自动 registry.list() 全部
+agent.run("...", enabled_skills=["a"]) # 显式 → 只列 a
+agent.run("...", enabled_skills=[])    # 显式空 → 不列任何(catalog 工具仍可用)
+```
+
+`Agent` 故意**没有** `default_enabled_skills` 字段 —— "全列"就是默认行为,
+不需要再额外配置。要 per-call subset 直接传 `enabled_skills=[...]`。
+
+**对齐 3:`DEFAULT_SKILLS_GUIDANCE` 注入 prelude**
+
+openai-agents 在 prelude 跟 skill 列表一起注入 ~30 行 "How to use skills"
+指令(trigger 规则 / progressive disclosure / coordination / fallback)。
+我们抄了**精简版**(~10 行,~110 token)到 `agent_kit.skill.DEFAULT_SKILLS_GUIDANCE`。
+
+- `SkillCatalogToolset(reg)` 默认 instructions=None → 注入 DEFAULT_SKILLS_GUIDANCE
+- `SkillCatalogToolset(reg, instructions="")` → 不注入
+- `SkillCatalogToolset(reg, instructions="### Custom...")` → 自定义
+- `Agent(skills=..., skills_instructions=...)` 透传给 SkillCatalogToolset
+
+**故意不抄的 openai-agents 部分**:
+
+| 不抄 | 理由 |
+|---|---|
+| `Skill(scripts/references/assets)` 结构化字段 | YAGNI;现有 `files dict[str, bytes]` 用 `scripts/foo.py` key 一样达到效果 |
+| eager vs lazy 两种模式 | 我们 `load_skill` 工具本来就是 lazy(frontmatter 进 prelude,body 按需 load),不需要二选一 |
+| `from_=Dir(...)` 物化到 sandbox workspace | 我们 spec § 16 决定不内置 sandbox |
 
 ---
 

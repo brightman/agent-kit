@@ -121,7 +121,8 @@ def _find_skill_catalog(
 async def _build_skill_section(
     catalog: SkillCatalogToolset, enabled_refs: list[str]
 ) -> str:
-    """spec § 10:渲染 "# Available Skills" 段。enabled_refs 为空返回 ""。"""
+    """spec § 10:渲染 "# Available Skills" 段 + (可选)catalog.instructions
+    使用指南。enabled_refs 为空返回 ""。"""
     if not enabled_refs:
         return ""
     wanted_names = {parse_skill_ref(ref)[0] for ref in enabled_refs}
@@ -138,7 +139,12 @@ async def _build_skill_section(
     ]
     for fm in matched:
         lines.append(f"- {fm.name} (v{fm.version}): {fm.description}")
-    return "\n".join(lines)
+    section = "\n".join(lines)
+    # spec § 10 修订 2026-05-26:catalog.instructions(默认 DEFAULT_SKILLS_GUIDANCE)
+    # 接在列表之后,让 LLM 知道 trigger 规则 / 进式 disclosure / fallback
+    if catalog._instructions:
+        section += "\n\n" + catalog._instructions
+    return section
 
 
 class Runner:

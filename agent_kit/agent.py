@@ -36,6 +36,12 @@ from .hooks import Hook
 from .loop import RunRequest
 from .provider import LlmProvider
 from .runner import Runner, RunResult
+from .skill import (
+    InMemorySkillRegistry,
+    Skill,
+    SkillCatalogToolset,
+    SkillRegistry,
+)
 from .toolset import BaseToolset
 from .types import Message
 
@@ -77,6 +83,11 @@ class Agent:
     instruction: str = ""
     tools: list[BaseToolset] = field(default_factory=list)
 
+    # skill catalog 简写(spec § 17.6,参考 openai-agents Skills capability)
+    skills: Path | str | SkillRegistry | list[Skill] | None = None
+    # prelude 的"如何用 skill"指南。None = 默认精简版;"" = 不加;str = 自定义
+    skills_instructions: str | None = None
+
     # advanced —— Runner ctor 的其他参数,默认值跟 Runner 一致
     hooks: list[Hook] = field(default_factory=list)
     compactor: ContextCompactor | None = None
@@ -91,15 +102,30 @@ class Agent:
 
     # 注意:**没有任何 tenant_id 字段**(spec § 1 修订 2026-05-25)。
     # 多租户应用层每个 tenant new 一份 Agent;SDK 自身完全 tenant-agnostic
+    # 注意:**没有 `default_enabled_skills` 字段**(spec § 17.6 决议
+    # 2026-05-26):`.run()` 不传 enabled_skills 时**默认全部** —— 跟
+    # openai-agents Skills 行为对齐,LLM 自己按 trigger / 任务匹配挑
 
     def __post_init__(self) -> None:
         # str → LiteLlm wrapper(需 extras)
         if isinstance(self.model, str):
             self.model = self._resolve_string_model(self.model)
+        # skill 源 → SkillCatalogToolset(prepend 到 tools 末尾)
+        self._skills_registry: SkillRegistry | None = self._resolve_skills_source(
+            self.skills
+        )
+        merged_tools = list(self.tools)
+        if self._skills_registry is not None:
+            merged_tools.append(
+                SkillCatalogToolset(
+                    self._skills_registry,
+                    instructions=self.skills_instructions,
+                )
+            )
         # 一次性构 Runner,跨多 `.run()` 复用(toolsets / provider 跨 run 状态保留)
         self._runner = Runner(
             provider=self.model,
-            toolsets=self.tools,
+            toolsets=merged_tools,
             default_max_rounds=self.default_max_rounds,
             system_prelude=self.instruction,
             compactor=self.compactor,
@@ -130,19 +156,27 @@ class Agent:
         metadata: dict[str, Any] | None = None,
     ) -> RunResult:
         """Async 一次性 run,返回 RunResult。遇 error event raise RuntimeError
-        (跟 Runner.run_to_completion 一致)。"""
-        return await self._runner.run_to_completion(
-            self._build_request(
-                user_message,
-                enabled_skills=enabled_skills,
-                max_rounds=max_rounds,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                prior_messages=prior_messages,
-                cancel_check=cancel_check,
-                metadata=metadata,
-            )
+        (跟 Runner.run_to_completion 一致)。
+
+        `enabled_skills` 语义(spec § 17.6 决议 2026-05-26):
+        - `None`(默认)= 自动展开为 registry.list() 全部 —— 跟 openai-agents
+          Skills 默认行为对齐,LLM 自己 trigger / 任务匹配挑选
+        - `[]` = 显式不在 prelude 列任何 skill(catalog 工具仍可用,LLM 可
+          自行 `list_skills` 发现)
+        - `["foo", "bar"]` = 只列这些
+        """
+        resolved_skills = await self._resolve_enabled_skills(enabled_skills)
+        req = self._build_request(
+            user_message,
+            enabled_skills=resolved_skills,
+            max_rounds=max_rounds,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            prior_messages=prior_messages,
+            cancel_check=cancel_check,
+            metadata=metadata,
         )
+        return await self._runner.run_to_completion(req)
 
     def run_sync(
         self,
@@ -156,32 +190,51 @@ class Agent:
         cancel_check: Callable[[], bool] | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> RunResult:
-        """Sync wrapper —— 内部走 `Runner.run_sync()`(`asyncio.run`)。
+        """Sync wrapper —— 内部走 `asyncio.run(self.run(...))`。
 
         **不能在已经跑着的 event loop 里调**(FastAPI handler / Jupyter async
         cell / async test)—— 调了会 raise 友好错误。那种场景直接 `await
         agent.run(...)`。
         """
-        return self._runner.run_sync(
-            self._build_request(
-                user_message,
-                enabled_skills=enabled_skills,
-                max_rounds=max_rounds,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                prior_messages=prior_messages,
-                cancel_check=cancel_check,
-                metadata=metadata,
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(
+                self.run(
+                    user_message,
+                    enabled_skills=enabled_skills,
+                    max_rounds=max_rounds,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    prior_messages=prior_messages,
+                    cancel_check=cancel_check,
+                    metadata=metadata,
+                )
             )
+        raise RuntimeError(
+            "Agent.run_sync() cannot be called from a running event loop "
+            "(FastAPI handler, async test, Jupyter async cell). "
+            "Use `await agent.run(...)` instead."
         )
 
     # ---- helpers ----
+
+    async def _resolve_enabled_skills(
+        self, explicit: list[str] | None
+    ) -> list[str]:
+        """spec § 17.6:`None` → 自动 fetch 全部;`[]` → 显式空;list → 透传。"""
+        if explicit is not None:
+            return list(explicit)
+        if self._skills_registry is None:
+            return []
+        fms = await self._skills_registry.list()
+        return [fm.name for fm in fms]
 
     def _build_request(
         self,
         user_message: str,
         *,
-        enabled_skills: list[str] | None,
+        enabled_skills: list[str],
         max_rounds: int | None,
         temperature: float | None,
         max_tokens: int | None,
@@ -192,7 +245,7 @@ class Agent:
         return RunRequest(
             agent_id=self.name,
             user_message=user_message,
-            enabled_skills=list(enabled_skills) if enabled_skills else [],
+            enabled_skills=enabled_skills,
             max_rounds=max_rounds if max_rounds is not None else self.default_max_rounds,
             temperature=(
                 temperature if temperature is not None else self.default_temperature
@@ -201,6 +254,37 @@ class Agent:
             prior_messages=list(prior_messages) if prior_messages else [],
             cancel_check=cancel_check,
             metadata=dict(metadata) if metadata else {},
+        )
+
+    @staticmethod
+    def _resolve_skills_source(
+        source: "Path | str | SkillRegistry | list[Skill] | None",
+    ) -> SkillRegistry | None:
+        """spec § 17.6:Agent.skills= 入口三选一:
+        - None → 无 skill catalog
+        - Path / str → FilesystemSkillRegistry(path)
+        - SkillRegistry 实例 → 直接用
+        - list[Skill] → InMemorySkillRegistry 包装
+        """
+        if source is None:
+            return None
+        if isinstance(source, SkillRegistry):
+            return source
+        if isinstance(source, (str, Path)):
+            # 延迟 import 避开 contrib 循环依赖
+            from .contrib.skills import FilesystemSkillRegistry
+
+            return FilesystemSkillRegistry(Path(source))
+        if isinstance(source, list):
+            # 同步检查每项是 Skill —— 列表里混了其他类型 fail-fast
+            if not all(isinstance(s, Skill) for s in source):
+                raise TypeError(
+                    "Agent(skills=[...]) requires a list of Skill objects"
+                )
+            return InMemorySkillRegistry(source)
+        raise TypeError(
+            f"Agent.skills expects Path / str / SkillRegistry / list[Skill] / None, "
+            f"got {type(source).__name__}"
         )
 
     @staticmethod

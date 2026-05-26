@@ -170,6 +170,32 @@ _TOOL_LOAD_SKILL = "load_skill"
 _TOOL_LOAD_SKILL_RESOURCE = "load_skill_resource"
 
 
+# spec § 10 修订 2026-05-26:跟 openai-agents Skills capability 的 prelude
+# 指令对齐(参考 sandbox/capabilities/skills.py _HOW_TO_USE_SKILLS_SECTION)。
+# 简化到 ~10 行 / ~110 token,关键的 trigger / 进 disclosure / coordination /
+# fallback 都覆盖。LLM 选择 skill 的质量提升明显。
+#
+# 调用方可以:
+# - SkillCatalogToolset(registry)                            ← 用这个默认
+# - SkillCatalogToolset(registry, instructions="custom...")  ← 覆盖
+# - SkillCatalogToolset(registry, instructions="")           ← 不加任何指令
+DEFAULT_SKILLS_GUIDANCE = (
+    "### How to use skills\n\n"
+    "- **Trigger**: if the user names a skill via `$SkillName` or the task "
+    "clearly matches a skill's description above, use that skill for that turn. "
+    "Multiple matches → use them all. Don't carry skills across turns unless "
+    "re-mentioned.\n"
+    "- **Progressive disclosure**: call `load_skill(name)` to read full SKILL.md "
+    "only when you've decided to use a skill; don't bulk-load everything. For "
+    "extra files inside a skill, call `load_skill_resource(name, path)` only "
+    "for what you need.\n"
+    "- **Coordination**: pick the minimal set that covers the request. Announce "
+    "briefly which skill(s) you're using and why.\n"
+    "- **Fallback**: if a named skill isn't in the list, say so and continue "
+    "with the best fallback approach."
+)
+
+
 class SkillCatalogToolset(BaseToolset):
     """暴露 list_skills / load_skill / load_skill_resource 给 LLM。
 
@@ -178,12 +204,27 @@ class SkillCatalogToolset(BaseToolset):
 
     **租户**:SDK 不带 tenant 概念(spec § 1)。Registry 实例本身就**已经**
     是 pre-scoped 的(application 层每个 tenant new 一份 registry)。
+
+    **prelude 指令**(`instructions` 参数,spec § 10 修订 2026-05-26):
+    - `None`(默认)= `DEFAULT_SKILLS_GUIDANCE` —— openai-agents 风格的精简
+      使用指南(trigger / progressive disclosure / coordination / fallback)
+    - `""` = 不加任何指令(纯列表)
+    - 任意 str = 自定义
     """
 
     name = "skill_catalog"
 
-    def __init__(self, registry: SkillRegistry) -> None:
+    def __init__(
+        self,
+        registry: SkillRegistry,
+        *,
+        instructions: str | None = None,
+    ) -> None:
         self._registry = registry
+        # None → use default;"" → no guidance;str → custom
+        self._instructions = (
+            DEFAULT_SKILLS_GUIDANCE if instructions is None else instructions
+        )
 
     def build_schemas(self) -> list[ToolSchema]:
         return [
@@ -301,11 +342,57 @@ class SkillCatalogToolset(BaseToolset):
             return ToolResult(call_id=call.id, content=f"BASE64:{b64}")
 
 
+class InMemorySkillRegistry(SkillRegistry):
+    """Registry backed by an explicit list of `Skill` objects(read-only)。
+
+    `Agent(skills=[Skill(...), Skill(...)])` 简写背后的实现 —— 给测试 /
+    in-code demo / 不想搭文件系统的场景用。生产应该用 `FilesystemSkillRegistry`
+    或自家 db-backed registry。
+
+    构造期校验 skill name 唯一,重名 raise ValueError。
+    """
+
+    def __init__(self, skills: list[Skill]) -> None:
+        self._skills: dict[str, Skill] = {}
+        for s in skills:
+            if s.name in self._skills:
+                raise ValueError(f"duplicate skill name: {s.name!r}")
+            self._skills[s.name] = s
+
+    async def list(self) -> list[SkillFrontmatter]:
+        return [s.frontmatter for s in self._skills.values()]
+
+    async def load(self, name: str, version: str | None = None) -> Skill:
+        if name not in self._skills:
+            raise KeyError(name)
+        skill = self._skills[name]
+        if version is not None and skill.frontmatter.version != version:
+            raise KeyError(
+                f"{name}@{version} not found (registry has "
+                f"{name}@{skill.frontmatter.version})"
+            )
+        return skill
+
+    async def save_draft(self, name: str, md: str, files: dict[str, bytes]) -> None:
+        raise NotImplementedError(
+            "InMemorySkillRegistry is read-only; use FilesystemSkillRegistry "
+            "or a db-backed registry for editable skills."
+        )
+
+    async def publish(self, name: str) -> str:
+        raise NotImplementedError(
+            "InMemorySkillRegistry is read-only; use FilesystemSkillRegistry "
+            "or a db-backed registry for editable skills."
+        )
+
+
 __all__ = [
     "SkillFrontmatter",
     "Skill",
     "SkillRegistry",
     "SkillCatalogToolset",
+    "InMemorySkillRegistry",
+    "DEFAULT_SKILLS_GUIDANCE",
     "parse_frontmatter",
     "parse_skill_ref",
 ]
