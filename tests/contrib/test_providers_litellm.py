@@ -268,7 +268,7 @@ async def test_ctor_kwargs_passthrough(monkeypatch) -> None:
 @pytest.mark.asyncio
 async def test_chat_stream_raises_not_implemented() -> None:
     p = LiteLlm("openai/gpt-4o-mini")
-    with pytest.raises(NotImplementedError, match="Stage 7"):
+    with pytest.raises(NotImplementedError, match="deferred"):
         async for _ in p.chat_stream([Message(role="user", content="hi")]):
             pass
 

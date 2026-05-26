@@ -91,10 +91,10 @@ class LiteLlm:
         temperature: float = 0.7,
         max_tokens: int | None = None,
     ) -> AsyncIterator[LlmDelta]:
-        # spec § 14 修订:stream 推迟到 Stage 7+。
-        # LlmProvider Protocol 要求不支持 stream 时 raise NotImplementedError。
+        # Stream is deferred (spec § 14). LlmProvider Protocol allows raising
+        # NotImplementedError on providers that don't yet support streaming.
         raise NotImplementedError(
-            "LiteLlm stream support is deferred — see spec § 14 (Stage 7+ candidate)"
+            "LiteLlm stream support is deferred — see spec § 14"
         )
         # unreachable but type-checker wants it
         yield  # type: ignore[unreachable]

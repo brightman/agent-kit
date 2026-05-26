@@ -1,68 +1,101 @@
 # agent-kit
 
-Minimal, framework-agnostic Python toolkit for building agent runtimes around:
+> Minimal, framework-agnostic Python toolkit for building agent runtimes.
 
-- **Agent loop** — bounded multi-round LLM ↔ tool conversation
-- **Skill** — SKILL.md-defined capability with progressive disclosure
-- **MCP** — first-class Model Context Protocol toolset(基于 Anthropic 官方 `mcp` SDK)
+```python
+from agent_kit import Agent
+
+agent = Agent(name="my-agent", model="gemini/gemini-2.5-flash")
+result = agent.run_sync("What's 7 * 6?")
+print(result.final_text)   # "42"
+```
+
+That's the whole thing for the simple case. Tools, skills, sandbox, MCP, hooks
+— they all stack on top without changing this shape.
 
 ## Why
 
-`baizhi-agent`、`fam-runtime` 各自实现了一份 agent loop + skill + MCP
-脚手架,但 90% 的轮廓重叠(provider 抽象、轮数 cap、tool dispatch、
-`mcp__<server>__<tool>` 命名、SKILL.md frontmatter、progressive disclosure)。
-本仓库把这层公共骨架抽出来,作为独立可复用的 Python 工具包(kit,而非全家桶
-SDK)—— 只提供骨架,不绑定上层业务。
+agent-kit is **the smallest viable agent runtime** that still covers what
+production agents actually need: a bounded LLM ↔ tool loop, progressive-
+disclosure skills, MCP integration, context compaction, hooks, and an
+optional diet sandbox. About **3,300 lines of code** plus extras.
 
-## Non-goals
+The kit gives you the *mechanism*; you bring the policy.
 
-按 [GOALS.md](../baizhi-agent/GOALS.md) Non-goals 对齐,本 kit **不**做:
+## Install
 
-- 多租户队列 / 资源调度
-- 持久化 / SQLite / 数据库
-- HTTP API / FastAPI 路由
-- 前端 UI / React
-- 鉴权 / 配额
-- LangChain / google.genai 等重依赖
+```bash
+pip install agent-kit                # core only (mcp + pyyaml + pydantic)
+pip install "agent-kit[litellm]"     # add LiteLLM for ~100 commercial models
+pip install "agent-kit[sandbox]"     # reserved for future sandbox extras
+```
 
-这些都是 **使用方** 的事(baizhi-agent / fam-runtime 等);agent-kit 只暴露
-`Runner.run(request) -> AsyncIterator[Event]`,使用方在外面包队列、写
-持久化、起 HTTP server。
+Python 3.11+. No google.genai / langchain / openai SDK dependencies.
 
-## Status
+## Features
 
-**Stage 0(2026-05-24)**:仓库骨架 + 设计文档。模块 stub 还没实现,真接
-进 baizhi-agent 之前不会发版。
+| Piece | What it does | Where |
+|---|---|---|
+| `Agent` | High-level façade — model + tools + skills + hooks + sandbox | `agent_kit/agent.py` |
+| `Runner` / `AgentLoop` | Bounded multi-round LLM ↔ tool loop with cancel + max_rounds | `agent_kit/{runner,loop}.py` |
+| `LlmProvider` Protocol | Any chat-completions backend. `LiteLlm` ships in `contrib` | `agent_kit/provider.py` |
+| `Skill` + `SkillCatalogToolset` | SKILL.md frontmatter parsing, progressive disclosure (L1/L2/L3) | `agent_kit/skill.py` |
+| `McpToolset` | Anthropic MCP SDK wrapper — `.stdio()` / `.sse()` / `.http()` factories, `tool_filter`, `${VAR}` env substitution | `agent_kit/mcp.py` |
+| `Hook` ABC | 4 cross-cutting hooks: `before_model` / `after_model` / `before_tool` / `after_tool` | `agent_kit/hooks.py` |
+| `ContextCompactor` | Pluggable history compaction; built-in `TruncatingCompactor` | `agent_kit/context.py` |
+| `SandboxToolset` + 3 runners | Diet sandbox: LocalDir / SRT / MCP via one Protocol | `agent_kit/contrib/sandbox/` |
 
-## Design
-
-- **[docs/tech-design.md](docs/tech-design.md)** —— Stage 1 实现 spec(契约级,
-  RFC 2119 措辞,Reviewer 读完应能逐条断言)
-- **[docs/proposal.md](docs/proposal.md)** —— 原始抽象提案 + 4 个开放问题的
-  讨论历史(已在 tech-design § 13 决议)
-
-模块划分:
+## Quick map
 
 ```
 agent_kit/
-  types.py     # Message / ToolCall / ToolResult / Event
-  provider.py  # LlmProvider Protocol
-  toolset.py   # BaseToolset ABC + ToolCallContext
-  skill.py     # Skill / SkillRegistry + SKILL.md 解析
-  mcp.py       # McpServerConfig + McpToolset(wrap Anthropic `mcp`)
-  loop.py      # AgentLoop.run 核心循环
-  runner.py    # Runner 门面
+  agent.py          # high-level Agent façade
+  runner.py         # Runner + RunResult + workspace lifecycle
+  loop.py           # AgentLoop core (bounded LLM ↔ tool rounds)
+  provider.py       # LlmProvider Protocol + LlmResponse
+  toolset.py        # BaseToolset ABC + ToolCallContext
+  skill.py          # Skill / SkillRegistry / SkillCatalogToolset
+  mcp.py            # McpServerConfig + McpToolset
+  hooks.py          # Hook ABC (4 no-op methods)
+  context.py        # ContextCompactor Protocol + TruncatingCompactor
+  contrib/
+    providers/      # LiteLlm provider
+    skills.py       # FilesystemSkillRegistry
+    sandbox/        # SandboxRunner Protocol + LocalDir/SRT/MCP runners
 ```
 
-## References
+## Documentation
 
-四套参考实现(SDK 设计的输入,**不抄代码,抄思路**):
+- **[docs/tutorial.md](docs/tutorial.md)** — start here. Walk through every
+  feature with runnable code.
+- **[docs/tech-design.md](docs/tech-design.md)** — full spec, RFC-style.
+  Read this if you're implementing an alternative `LlmProvider` /
+  `SkillRegistry` / `Hook` / `SandboxRunner`.
+- **[samples/](samples/)** — runnable demos:
+  - [`agent-skills-tutorial`](samples/agent-skills-tutorial) — agent-kit port
+    of Google ADK's skills demo. Inline / file-based / external / meta skills.
+  - [`coding-agent`](samples/coding-agent) — sandbox demo. Stub backend for
+    offline tests; LocalDir backend for real subprocess + bug-fix end-to-end.
 
-- `../adk-python-main/` — Google ADK,BaseLlmFlow + McpToolset
-- `../OpenHarness/` — QueryEngine pull 模型 + 全局 McpClientManager
-- `../baizhi-agent/` — LlmAgentRunner + 进步式 disclosure + 每 skill scoped storage
-- `../Fam/fam_runtime/` — FamRuntime + 按 family_id 缓存 MCP
+## What it deliberately doesn't do
+
+- Multi-tenant queues, persistence, HTTP / WebSocket APIs, auth, quotas —
+  bring your own framework
+- LangChain / google.genai compatibility — won't be added
+- Built-in Memory / Session abstractions — use `prior_messages` + your store
+- Multi-agent orchestration — single-agent runtime by design
+- LLM-summary compaction — write a `ContextCompactor` if you need it
+
+See [spec § 15](docs/tech-design.md) for the full out-of-scope list.
+
+## Testing
+
+```bash
+pip install -e ".[dev,litellm]"
+python -m pytest                            # 374 tests, ~3s
+python -m pytest tests/contrib/sandbox/ -v  # 65 sandbox-specific
+```
 
 ## License
 
-待定(初始候选:Apache-2.0)。
+Apache-2.0.

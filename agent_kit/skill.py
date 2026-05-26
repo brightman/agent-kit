@@ -1,14 +1,16 @@
 """Skill 抽象 —— SKILL.md 是契约,不是 Python class。
 
-设计原则(对齐 baizhi-agent GOALS.md N1):
+设计原则:
 - Skill 的"行为"靠 LLM 读 SKILL.md body 后调工具实现
-- SDK 只负责:解析 frontmatter、按需暴露 body 给 LLM、给每个 skill 独立 storage 根目录
-- Progressive disclosure 是默认:启动时只把 frontmatter 注入 system prompt,正文按需 load_skill
+- SDK 只负责:解析 frontmatter、按需暴露 body 给 LLM、给每个 skill 独立
+  storage 根目录
+- Progressive disclosure 是默认:启动时只把 frontmatter 注入 system prompt,
+  正文按需 load_skill
 
-SkillCatalogToolset 是内置 toolset,提供三个工具:
-- list_skills() —— 已经在 system prompt 里给了 frontmatter,这里返回更结构化的元数据
-- load_skill(name, version?) —— 返回完整 SKILL.md body
-- load_skill_resource(name, path, version?) —— 返回 skill 包内附带的辅助文件
+`SkillCatalogToolset` 是内置 toolset,自动暴露三个工具:
+- `list_skills()` —— 返回结构化元数据(frontmatter 已在 prelude)
+- `load_skill(name, version?)` —— 返回完整 SKILL.md body
+- `load_skill_resource(name, path, version?)` —— 返回 skill 包内附带的辅助文件
 """
 
 from __future__ import annotations
@@ -51,17 +53,17 @@ class Skill:
 
 
 class SkillRegistry(ABC):
-    """skill 持久层的统一接口。baizhi-agent / fam-runtime 各自实现。
+    """skill 持久层的统一接口 —— 实现这个 ABC 把任何后端(filesystem / db /
+    远程 catalog)接进 agent-kit。
 
-    **租户**:SDK **不**带 tenant 概念(spec § 1 决议,2026-05-25 修订)。
-    需要多租户的应用层(baizhi)实现自己的 db-backed registry,通过 closure /
-    instance-per-tenant 的方式把 tenant 绑死在 Registry 实例上 —— 例如:
+    **租户**:SDK 不带 tenant 概念(spec § 1)。多租户应用层自己写
+    db-backed registry,通过 closure / per-tenant instance 把 tenant 绑死在
+    Registry 实例上 —— 例如:
 
         def make_registry_for(tenant_id):
-            return _TenantScopedSkillRegistry(baizhi_db, tenant_id=tenant_id)
+            return MyDbRegistry(db, tenant_id=tenant_id)
 
-    上层 application 再 `Agent(skills=make_registry_for(tenant))` 给每个
-    tenant 一份 Agent(spec § 17.6 模式)。
+        Agent(skills=make_registry_for(tenant))  # 每个 tenant 一份 Agent
     """
 
     @abstractmethod
@@ -71,7 +73,7 @@ class SkillRegistry(ABC):
     async def load(
         self, name: str, version: str | None = None
     ) -> Skill:
-        """Q2 决议:version=None 拿 latest;给具体值拿 immutable publish。
+        """version=None 拿 latest;给具体值拿 immutable publish。
         不存在 → raise KeyError。"""
 
     @abstractmethod

@@ -3,13 +3,12 @@
 ## 设计
 
 - **4 个方法**:`before_model` / `after_model` / `before_tool` / `after_tool`
-- **基类 + no-op 默认**:子类只覆盖关心的方法(对应 ADK 风格的 callback 字段
-  我们合并成一个类,组合更结构化)
+- **基类 + no-op 默认**:子类只覆盖关心的方法
 - **Async only**:简化 contract;sync 逻辑用 `asyncio.to_thread` 自己包
 - **List 顺序遍历,first-non-None wins**:多个 hook 按注册顺序调用;
-  第一个返回非 None 的短路,后续 hook 跳过(对齐 ADK 短路语义)
+  第一个返回非 None 的短路,后续 hook 跳过
 - **异常不 swallow**:hook raise → loop 转成 `Event(kind="error", stage="hook")`
-  + return(对齐 ADK plugins,反对 baizhi-agent / fam-runtime 的 swallow)
+  + return(不让错误被吞)
 
 ## 短路时也跑后续么?
 

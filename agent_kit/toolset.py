@@ -1,15 +1,14 @@
 """BaseToolset + ToolCallContext —— 工具集统一接口。
 
 任何"一组可被 LLM 调的工具"都实现 BaseToolset:
-- 内置 SkillCatalogToolset
-- 每个 MCP server 一份 McpToolset
+- 内置 `SkillCatalogToolset`(progressive disclosure 三件套)
+- 内置 `SandboxToolset`(exec_command / read_file / write_file —— 见
+  `agent_kit.contrib.sandbox`)
+- 每个 MCP server 一份 `McpToolset`
 - 用户自定义的 Python 函数集
 
-ToolCallContext 是 SDK 和 toolset 的契约 —— 所有 execute() 都拿到一样的上下文。
-
-设计来源:
-- ADK BaseTool / Toolset
-- baizhi-agent toolsets.py(BaseToolset、SkillStorageToolset、SkillCatalogToolset)
+`ToolCallContext` 是 SDK 和 toolset 的契约 —— 所有 `execute()` 都拿到
+一样的上下文(workspace / cancel / emit / storage / ...)。
 """
 
 from __future__ import annotations
@@ -75,8 +74,8 @@ class BaseToolset(ABC):
 
         默认 = `self.build_schemas()`(静态 toolset 无需 override)。
 
-        想 per-run 过滤 / 动态生成的 toolset(例如 baizhi `SkillToolsetCatalog`
-        按 `request.enabled_skills` 暴露 `skill_*` 工具)override 这个方法。
+        想 per-run 过滤 / 动态生成的 toolset(例如按 `request.enabled_skills`
+        暴露子集工具,或按 `request.metadata['tenant']` 跑 ACL)override 这个方法。
         AgentLoop 每个 `run()` 入口调它,所以同一个 toolset 实例跨多 run
         可以 advertise 不同 schemas。
         """

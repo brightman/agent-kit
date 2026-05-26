@@ -8,20 +8,20 @@ Layout 约定:
             <other files>  # 任意辅助文件,跟 SKILL.md 同包,被 load() 全量打包
 
 特性:
-- **读 only**:`save_draft` / `publish` 抛 `NotImplementedError`。真要编辑用
-  db-backed registry(baizhi-agent / fam-runtime 各自实现)
-- **租户**:SDK 不带 tenant 概念(spec § 1,2026-05-25 修订);需要 per-tenant
-  skill 集的 application 自己 new 一份 registry / Agent
-- **版本**:每个 skill 目录代表"latest";`load(version=X)` 命中 frontmatter.version
-  就 OK,不匹配 / 缺省版本字段(默认 "0.0.0")时给具体 version 直接 KeyError
+- **读 only**:`save_draft` / `publish` 抛 `NotImplementedError`。要编辑用
+  自己的 db-backed registry(直接实现 `SkillRegistry` ABC)
+- **租户**:SDK 不带 tenant 概念(spec § 1);需要 per-tenant skill 集的
+  application 自己 new 一份 registry / Agent
+- **版本**:每个 skill 目录代表 "latest";`load(version=X)` 命中
+  `frontmatter.version` 就 OK,缺省版本字段(默认 "0.0.0")给具体 version
+  时直接 KeyError
 - **扫描**:首次 `list` / `load` 触发,后续缓存。`invalidate()` 重新扫
-- **子目录里没 SKILL.md**:跳过(允许 NOTICE.md / README 等顶层散件混在 skills_root)
-- **frontmatter.name 跟目录名不一致**:**以 frontmatter 为准**(spec § 6.1 contract)
-- **重名 skill**:扫描期 raise `ValueError`(fail-fast,使用方应该自己保证唯一)
+- **子目录无 SKILL.md**:跳过(允许 NOTICE.md / README 等散件混在 skills_root)
+- **frontmatter.name 跟目录名不一致**:**以 frontmatter 为准**(spec § 6.1)
+- **重名 skill**:扫描期 raise `ValueError`(fail-fast)
 
-跟 `SkillRegistry` ABC 的关系:
-- reference 实现,不是唯一实现
-- baizhi / fam 真持久层(db / 远程 catalog)继续 implement ABC,**不**通过 contrib
+这是 reference 实现;db-backed 持久层应该直接 implement `SkillRegistry`,
+不必走 contrib。
 """
 
 from __future__ import annotations

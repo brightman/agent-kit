@@ -1,11 +1,10 @@
 """LlmProvider Protocol —— 所有 LLM 接入的最小接口。
 
-设计来源:
-- baizhi-agent llm/base.py(MiniMaxProvider / LiteLlmProvider 已实现这一接口形状)
-- ADK BaseLlm.generate_content_async 简化版
-
 只规定两个方法:chat(non-stream)+ chat_stream(stream)。模型 id / API key /
 base_url / 重试 / 速率限制 全部在 provider 的构造函数里吃掉,loop 层不感知。
+
+参考实现在 `agent_kit.contrib.providers.litellm.LiteLlm`(装上
+`pip install agent-kit[litellm]`),通过 LiteLLM 接 100+ 商业模型。
 """
 
 from __future__ import annotations

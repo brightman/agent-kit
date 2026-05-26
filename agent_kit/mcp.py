@@ -1,24 +1,25 @@
 """MCP 集成 —— wrap Anthropic 官方 `mcp` Python SDK。
 
-不重写 MCP transport / JSON-RPC / initialize 握手 —— 直接用 Anthropic 的
-`mcp` 包(参考 baizhi-agent PR f6 = pr-mcp-sdk-adopt 的迁移)。SDK 只在 mcp
-之上加一层 baizhi 风格的:
+不重写 MCP transport / JSON-RPC / initialize 握手 —— 直接用 Anthropic
+官方 `mcp` 包。SDK 只在它之上加一层:
 
-- 命名 `mcp__<server>__<tool>`(与 OH / baizhi-agent / fam-runtime 共识)
-- `${VAR}` 模板替换(SDK 没有这个约定)
+- 命名 `mcp__<server>__<tool>`(让 Router 能按前缀分发)
+- `${VAR}` 模板替换(env / secrets 注入 url / command / headers)
 - 显式 `async connect()` + idempotent `aclose()`(spec § 7.5.1)
+- 三种 transport 的便捷工厂(`.stdio()` / `.sse()` / `.http()`)
+- `tool_filter` —— 选择性暴露 server 端工具
 
-**Lifecycle**:一个 McpToolset 实例 == 一个 MCP server == 一个 MCP session。
-session 的生命周期等于 McpToolset 实例的生命周期。**使用方控制何时构造、
-何时 aclose**(spec § 7.2 4 种用法 per-call / per-run / per-tenant / global)。
+**Lifecycle**:一个 McpToolset 实例 == 一个 MCP server == 一个 MCP
+session。session 的生命周期等于 McpToolset 实例的生命周期。**使用方
+控制何时构造、何时 aclose**(spec § 7.2 给了 4 种用法:per-call /
+per-run / per-tenant / global)。
 
 **Lazy connect**:`build_schemas` 是同步的(BaseToolset 契约),但 MCP
-list_tools 是 async,所以:
+`list_tools` 是 async,所以:
 - `await toolset.connect()` 必须在 Router init 之前显式调用一次
-- Runner 在 setup 阶段自动遍历 toolsets 调它(`agent_kit/runner.py`),
-  常路径无样板
+- Runner 在 setup 阶段自动遍历 toolsets 调它,常路径无样板
 - 直接用 AgentLoop 的使用方自己负责
-- connect()/aclose() 均 idempotent —— 允许跨 run 复用 + 安全重入
+- `connect()` / `aclose()` 均 idempotent —— 允许跨 run 复用 + 安全重入
 """
 
 from __future__ import annotations
@@ -41,8 +42,9 @@ from .toolset import BaseToolset, ToolCallContext
 from .types import ToolCall, ToolResult
 
 
-# spec § 7.4:server.name 不能含 "__"(与命名前缀分隔符冲突)。
-# 允许短横线以兼容 baizhi-agent catalog 中的 `web-search` server_id。
+# spec § 7.4: server.name MUST NOT contain "__" (it'd collide with the
+# `mcp__<server>__<tool>` prefix). Hyphens are allowed so common catalogs
+# like `web-search` / `code-interpreter` work without rewrite.
 _SERVER_NAME_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 _VAR_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 

@@ -1,39 +1,22 @@
 """Runner —— 使用方面向的门面类。
 
 把 provider + toolsets 组装成可执行 run,统一返回 `AsyncIterator[Event]`
-或聚合的 `RunResult`(Q4 双轨)。
+或聚合的 `RunResult`。
 
 设计要点(对齐 docs/tech-design.md § 9 / § 10):
 
 - **不为你 new toolset**:使用方传入 `toolsets: list[BaseToolset]`,
-  Runner 不掌控其 lifecycle。Runner 通过 `loop.aclose()` 在 finally 阶段
-  触发 toolset 资源释放(详见 § 9.3)
+  Runner 不掌控其 lifecycle。Runner 通过 `loop.aclose()` 在 finally
+  触发 toolset 资源释放
 - **skill catalog 来自 discovery**:Runner 不收 `skill_registry` 参数;
-  而是在 toolsets 列表里 isinstance 找 `SkillCatalogToolset`,从中读
-  registry 去构造 prelude 段(§ 10.1)
-- **workspace 生命周期**:run_id 启动时分配,workspace = workspace_root / run_id;
-  mkdir 在 run 开头,finally 删
-- **错误传播 Q4 双轨**:`run` yield error event 后 return;
+  在 toolsets 列表里 isinstance 找 `SkillCatalogToolset`,从中读 registry
+  去构造 prelude 段(§ 10.1)
+- **workspace 生命周期**:run_id 启动时分配,
+  workspace = workspace_root / run_id;mkdir 在 run 开头,finally 删
+- **错误传播双轨**:`run` yield error event 后 return;
   `run_to_completion` 遇 error event raise RuntimeError
 
-典型用法:
-
-    from agent_kit import Runner, RunRequest
-    from agent_kit.skill import SkillCatalogToolset
-
-    runner = Runner(
-        provider=LiteLlmProvider("minimax/MiniMax-M2.7"),
-        toolsets=[
-            SkillCatalogToolset(skill_registry),
-            *toolsets_from_configs([...]),
-        ],
-    )
-    # 流式:
-    async for evt in runner.run(RunRequest(agent_id="researcher", user_message="...")):
-        print(evt.kind, evt.payload)
-    # 聚合:
-    result = await runner.run_to_completion(RunRequest(...))
-    print(result.final_text)
+绝大多数场景直接用 `agent_kit.Agent` 即可,Runner 是更底层的逃生口。
 """
 
 from __future__ import annotations
@@ -60,9 +43,9 @@ from .types import Event
 
 @dataclass
 class RunResult:
-    """`run_to_completion` 的聚合返回(Q4 决议,spec § 3.8)。
+    """`run_to_completion` 的聚合返回(spec § 3.8)。
 
-    `cancelled` / `error` 互斥与 `final_text` 的关系:
+    `cancelled` / `error` 与 `final_text` 的关系:
     - 成功路径:`final_text` 非 None,`cancelled=False`,`error=None`
     - 取消:`cancelled=True`,`final_text` 可能为 None
     - error 路径:`run_to_completion` 抛 RuntimeError,不返回 RunResult
@@ -170,15 +153,15 @@ class Runner:
         路径与生命周期(provider 负责 mkdir,SDK 不删);ctx.workspace_ephemeral
         随之为 False,toolset 可在 workspace 跨 run 缓存(如 skill files 物化)。
 
-        典型用法:把 baizhi-agent 的 tenant_agent 持久空间映射进 SDK
-            def baizhi_workspace(req, run_id):
-                # tenant 在 baizhi application 层通过 closure 或自家 metadata 取
-                # SDK 自己不带 tenant 概念(spec § 1)
-                p = Path(f"/data/baizhi/{this_tenant_id}/agents/{req.agent_id}")
+        典型用法:把使用方的 per-agent / per-tenant 持久空间映射进 SDK
+
+            def persistent_workspace(req, run_id):
+                # tenant 在 application 层用 closure 或 req.metadata 取
+                p = Path(f"/data/agents/{req.agent_id}/{this_tenant_id}")
                 p.mkdir(parents=True, exist_ok=True)
                 return p
 
-            Runner(..., workspace_provider=baizhi_workspace)
+            Runner(..., workspace_provider=persistent_workspace)
         """
         self._provider = provider
         self._toolsets = list(toolsets)
@@ -294,16 +277,13 @@ class Runner:
     def run_sync(self, request: RunRequest) -> RunResult:
         """同步 wrapper —— 内部就是 `asyncio.run(self.run_to_completion(request))`。
 
-        spec § 9.2 (Stage 5 修订):给纯 sync 调用方(CLI / 命令行脚本 /
-        Jupyter sync cell / sync codebase 渐进迁移如 baizhi-agent)用。
+        给纯 sync 调用方(CLI / 命令行脚本 / Jupyter sync cell / sync codebase
+        渐进迁移)用。
 
         **不能在已经跑着的 event loop 里调**(FastAPI handler / async test /
         Jupyter async cell)—— fail-fast 报友好错误,而不是让 Python 抛
         `RuntimeError: asyncio.run() cannot be called from a running event loop`。
         那种场景请直接 `await runner.run_to_completion(request)`。
-
-        形态参考 openai-agents `Runner.run_sync`;**不返 Generator**
-        (若需要 sync 实时事件流,见 spec § 14 Stage 7+ 候选)。
         """
         try:
             asyncio.get_running_loop()

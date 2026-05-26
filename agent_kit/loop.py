@@ -1,12 +1,12 @@
 """AgentLoop —— SDK 的核心:bounded 多轮 LLM ↔ tool 循环。
 
-设计要点(综合四家):
-- pull 模型:`AsyncIterator[Event]`(ADK / OH 风格)
-- 轮数 cap 是硬约束(baizhi-agent / fam-runtime)
-- 最后一轮屏蔽 tools 强制收尾(baizhi-agent 发明)
+设计要点:
+- pull 模型:`AsyncIterator[Event]`
+- 轮数 cap 是硬约束,防 LLM 死循环 / 失控费用
+- 最后一轮屏蔽 tools 强制收尾(provider 看到 `tools=None`,只能返 text)
 - 终止条件:`response.tool_calls is []` 退出
 - 取消用 asyncio.Event,在 round/chat/tool 边界 check
-- Compactor 在每次 chat 前调用,SDK 兜底 _assert_tool_pairs_intact
+- Compactor 在每次 chat 前调用,SDK 兜底 `_assert_tool_pairs_intact`
 - 4 个 Hook(before/after × model/tool),first-non-None 短路
 
 完整契约见 docs/tech-design.md § 8。
@@ -53,24 +53,21 @@ def _check_request_cancel(cancel_check: Any) -> bool:
 class RunRequest:
     """一次 run 的输入。
 
-    ## prior_messages(spec § 3.x,2026-05-25 加)
+    ## prior_messages
 
     多轮对话场景把**已经发生过**的 user / assistant / tool turns 喂进 fresh
     `Runner.run()`,让 LLM 看到完整 conversation history。典型用法两种:
 
     1. **多轮 chat history**:每个新 user turn 把过去几轮 messages 作为
-       `prior_messages` 一起传,user_message 是这一轮新的输入
-    2. **honesty / correction re-run**:LLM 上一轮 final_text 不达标(比如
-       baizhi storage-intent 检测),把上一轮 `assistant(text)` 塞进
-       `prior_messages`,`user_message` 写 "runtime correction: ..." 再跑一遍
+       `prior_messages` 一起传,`user_message` 是这一轮新的输入
+    2. **honesty / correction re-run**:LLM 上一轮 final_text 不达标,把
+       上一轮 `assistant(text)` 塞进 `prior_messages`,`user_message`
+       写 "Runtime correction: ..." 再跑一遍
 
     **不在 SDK scope** 的两件事(留 use site policy):
-    - history 压缩 / 摘要 / 滑动窗口 cutoff —— 选哪个 LLM 摘要、cutoff 多少、
-      失败 fallback 啥,都是 product 决策,SDK 不绑。需要的可以用
-      `ContextCompactor`(loop 内自动 compact) 或 use site 在构造 RunRequest
-      前自己跑 `compress(history) → prior_messages`
-    - 多模态 content block —— prior_messages 跟 user_message 一样,Stage 0-5
-      维持 `str` content(spec Q3 决议)
+    - history 压缩 / 摘要 / 滑动窗口 cutoff —— 用 `ContextCompactor`(loop
+      内自动 compact) 或 use site 自己 `compress(history) → prior_messages`
+    - 多模态 content block —— 目前 `content` 是 `str`,Stage 6+ 看需求扩
 
     ## Invariants(__post_init__ 校验)
 
@@ -93,7 +90,7 @@ class RunRequest:
     max_rounds: int = 10
     temperature: float = 0.7
     system_prelude: str = ""
-    stream: bool = False                       # Q1 决议:opt-in stream(Stage 5)
+    stream: bool = False                       # opt-in stream (deferred, spec § 14)
     metadata: dict[str, Any] = field(default_factory=dict)
     prior_messages: list[Message] = field(default_factory=list)
     cancel_check: Callable[[], bool] | None = None
@@ -143,16 +140,16 @@ class AgentLoop:
         self._prelude = system_prelude
         self._compactor = compactor
         self._hooks = list(hooks or ())
-        # spec § 5.4(Stage 5 修订):Router per-run 重建,见 run()。
-        # 这里不再持有 Router 实例
+        # spec § 5.4: Router is rebuilt per-run (see `run()`) so toolsets
+        # can advertise different schemas for different RunRequests.
 
     # ---- public ----
 
     async def aclose(self) -> None:
         """关闭所有 toolset(按 registration order 反序;每个的异常 swallow + log)。
 
-        spec § 5.4 修订:不再委托给 Router(Router 是 per-run 的,
-        生命周期不匹配)。直接遍历 toolsets。
+        Not delegated to Router because Router is per-run (lifecycle mismatch);
+        we walk the toolsets list directly.
         """
         import logging
         log = logging.getLogger(__name__)
@@ -169,10 +166,11 @@ class AgentLoop:
     ) -> AsyncIterator[Event]:
         """执行多轮 loop,yield 事件。"""
         if request.stream:
-            # Stream 路径见 Stage 5(tech-design § 8.5);本 Stage 2 fallback 报错
+            # Stream path is deferred (see spec § 14). Fail fast so callers
+            # who flip the flag without a stream-capable provider see why.
             yield self._mk_event(
                 None, "error",
-                {"stage": "loop", "message": "stream mode is Stage 5, not yet implemented"},
+                {"stage": "loop", "message": "stream mode is not yet implemented (spec § 14)"},
             )
             return
 

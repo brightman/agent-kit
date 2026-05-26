@@ -1,9 +1,9 @@
 """核心数据类型 —— 纯数据,不依赖任何 IO / provider / runtime。
 
-设计来源:
-- ToolCall / ToolResult 形状收敛于 ADK / OpenHarness / baizhi-agent / fam-runtime 共识
-- Event 的 event_id + parent_event_id 来自 baizhi-agent PR α(pr-trace-a)
-- Message 同时容纳 OpenAI(role+content+tool_calls)和 Anthropic(content blocks)风格
+- `Message` 同时容纳 OpenAI(role+content+tool_calls)和 Anthropic
+  (content blocks)风格
+- `Event` 带 `event_id` + `parent_event_id`,上层 trace UI 可直接渲染树形
+- `ToolCall` / `ToolResult` 是 OpenAI tool-use 格式的窄子集
 
 每类都附 `to_dict()` 供 Event payload 序列化用,反向 `from_dict()` 用于
 反序列化 trace。
@@ -18,7 +18,7 @@ Role = Literal["system", "user", "assistant", "tool"]
 EventKind = Literal[
     "round_start",
     "llm_request",
-    "llm_delta",                # Q1 stream 决议,仅 stream 模式下出现
+    "llm_delta",                # 仅 stream 模式下出现(deferred,见 spec § 14)
     "llm_response",
     "llm_short_circuited",      # before_model hook 短路 → 替代 llm_response 之前的 LLM 实调
     "tool_call",
