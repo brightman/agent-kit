@@ -1,0 +1,21 @@
+[project]
+name = "agent-skills-tutorial"
+version = "0.1.0"
+description = "agent-kit port of ADK agent-skills-tutorial. Demonstrates 4 skill patterns (inline, file-based, external, meta) behind a single SkillCatalogToolset with progressive disclosure (list_skills / load_skill / load_skill_resource)."
+license = {text = "Apache-2.0"}
+readme = "README.md"
+requires-python = ">=3.11"
+
+dependencies = [
+    # Local agent-kit checkout (editable install). Use `pip install -e ..`
+    # from this directory, or `pip install agent-kit[litellm]` once released.
+    "agent-kit[litellm]",
+    "python-dotenv>=1.0.0,<2.0.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
