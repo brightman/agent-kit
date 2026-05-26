@@ -1,12 +1,20 @@
-# coding-agent (agent-kit sample · Stage B sandbox API freeze)
+# coding-agent (agent-kit sample · sandbox API demo)
 
-This sample's job: **freeze the `SandboxToolset` + `SandboxRunner` API** before
-Stages C-E build the real `LocalDir` / `SRT` / `MCP` runners. It ships:
+This sample wires `Agent` against `agent_kit.contrib.sandbox.SandboxToolset`.
+Originally it lived in Stage B to **freeze** the SandboxRunner / SandboxToolset
+API; the freeze tests now serve as a regression suite that pins the contract
+across Stage C-E backends.
 
-- The full Stage-B contract (`app/sandbox/{types,toolset}.py`)
-- A `StubRunner` backed by an in-memory `dict[str, bytes]` (no real subprocess,
-  no API key, no sandbox image)
-- 14 offline tests that pin the contract — Stage C breaks them = freeze broken
+It ships:
+
+- A local `StubRunner` (`app/_stub.py`) backed by an in-memory `dict[str, bytes]`
+  — no real subprocess, no API key, no sandbox image
+- 14 offline tests that pin the contract — any Stage C-E change that breaks
+  them = freeze broken
+- (As of Stage C) `LocalDirRunner` is shipped in
+  `agent_kit.contrib.sandbox.runners.localdir` and tested in
+  `tests/contrib/sandbox/test_localdir.py` — swap the import in `app/agent.py`
+  to use it with real subprocesses
 
 See spec § 16 in `docs/tech-design.md` for the wider design.
 
@@ -54,17 +62,18 @@ ExecResult(stdout: bytes, stderr: bytes, exit_code: int, truncated: bool = False
 ```
 samples/coding-agent/
 ├── app/
-│   ├── agent.py          Agent construction
+│   ├── agent.py          Agent + SandboxToolset(StubRunner) wiring
 │   ├── main.py           CLI (one-shot + REPL)
-│   ├── test_agent.py     14 freeze tests
-│   └── sandbox/          ← Stage C moves this whole subtree to
-│       │                   agent_kit/contrib/sandbox/ unchanged
-│       ├── types.py      SandboxRunner Protocol + ExecResult
-│       ├── toolset.py    SandboxToolset (BaseToolset)
-│       └── runners/
-│           └── stub.py   In-memory StubRunner + DEFAULT_COMMANDS
+│   ├── test_agent.py     14 freeze tests (pin the contract)
+│   └── _stub.py          Sample-local StubRunner + DEFAULT_COMMANDS
 ├── pyproject.toml
 └── .env.example
+
+agent_kit/contrib/sandbox/        ← Moved here in Stage C
+├── types.py                      SandboxRunner Protocol + ExecResult
+├── toolset.py                    SandboxToolset (BaseToolset)
+└── runners/
+    └── localdir.py               Real-subprocess runner (Stage C)
 ```
 
 ## Run
@@ -96,13 +105,31 @@ PYTHONPATH=../.. python -m app.main "Read task.md and do as told."
   matches the contract decision in spec § 16.3 (all three real runners do the
   same)
 
-## Going from Stage B → Stage C
+## Swap StubRunner for LocalDirRunner
 
-1. `mv samples/coding-agent/app/sandbox agent_kit/contrib/sandbox`
-2. Add `agent_kit/contrib/sandbox/runners/localdir.py` (real subprocess)
-3. Update sample's `app/agent.py` to import from `agent_kit.contrib.sandbox`
-4. Run the 14 tests — they MUST still pass without modification
-5. If any test needed editing, freeze is broken — go back to Stage B
+Once Stage C ships, you can swap to a real-subprocess runner in 3 lines:
+
+```python
+# in app/agent.py
+from agent_kit.contrib.sandbox.runners import LocalDirRunner
+
+runner = LocalDirRunner(command_allowlist=["python", "pytest", "ls", "cat"])
+# instead of: StubRunner(files=..., commands=DEFAULT_COMMANDS)
+```
+
+`LocalDirRunner` runs commands as actual host subprocesses (no isolation —
+trusted code only) under the agent's workspace dir, with path-traversal
+defense and an optional `command_allowlist`. See
+`tests/contrib/sandbox/test_localdir.py` for the full contract.
+
+## Stage history
+
+| Stage | Tag | What changed |
+|---|---|---|
+| B | `sandbox-api-frozen` | SandboxRunner / SandboxToolset frozen via 14 tests |
+| C | `sandbox-1` | Moved to `agent_kit/contrib/sandbox/`; added LocalDirRunner |
+| D | (planned) | SrtRunner — Anthropic sandbox-runtime |
+| E | (planned) | McpSandboxRunner — any MCP exec server |
 
 ## Mapping to spec § 16
 

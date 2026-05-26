@@ -1,17 +1,12 @@
-"""`StubRunner` — in-memory `SandboxRunner` for offline tests + sample demos.
+"""`StubRunner` — sample-local in-memory `SandboxRunner` for offline tests.
 
-NOT a real sandbox. Workspace is a `dict[str, bytes]`; `exec()` dispatches to
-scripted handlers; setup() mkdirs the host workspace path (mirroring what real
-runners do per spec § 16.3 decision #3) but never reads from it.
+NOT shipped with the SDK. Real backends live at
+`agent_kit.contrib.sandbox.runners.{localdir,srt,mcp}`. StubRunner stays here
+because it's a test convenience, not a production runner.
 
-Used by:
-- `samples/coding-agent/app/agent.py`  — wires it under SandboxToolset
-- `samples/coding-agent/app/test_agent.py` — offline tests, no API key
-
-Replaced in Stage C-E by:
-- LocalDirRunner (real host subprocess)
-- SrtRunner (Anthropic sandbox-runtime)
-- McpSandboxRunner (any MCP exec server)
+Workspace is a `dict[str, bytes]`; `exec()` dispatches to scripted handlers;
+setup() mkdirs the host workspace path (matching what real runners do per
+spec § 16.3 decision #3) but never reads from it.
 
 The SandboxRunner Protocol — the slot StubRunner fills — does not change.
 """
@@ -22,7 +17,7 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
-from ..types import ExecResult
+from agent_kit.contrib.sandbox.types import ExecResult
 
 CommandHandler = Callable[[list[str], "StubRunner"], Awaitable[ExecResult]]
 

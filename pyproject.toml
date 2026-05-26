@@ -22,6 +22,10 @@ dependencies = [
 
 [project.optional-dependencies]
 litellm = ["litellm>=1.40"]
+# `sandbox` extra is reserved for future runners (SRT, MCP-sandbox) that may
+# need extra deps. LocalDirRunner (Stage C) is stdlib-only, so this list is
+# empty for now — `pip install agent-kit[sandbox]` is forward-compatible.
+sandbox = []
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",

@@ -13,8 +13,9 @@ import os
 
 from agent_kit import Agent
 
-from .sandbox import SandboxToolset
-from .sandbox.runners import DEFAULT_COMMANDS, StubRunner
+from agent_kit.contrib.sandbox import SandboxToolset
+
+from ._stub import DEFAULT_COMMANDS, StubRunner
 
 INSTRUCTION = (
     "You are a coding agent with a sandbox workspace.\n\n"

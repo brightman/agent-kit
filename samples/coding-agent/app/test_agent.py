@@ -18,8 +18,9 @@ from agent_kit import Agent, ToolCall
 from agent_kit.provider import LlmResponse
 
 from .agent import build_agent
-from .sandbox import ExecResult, SandboxRunner, SandboxToolset
-from .sandbox.runners.stub import DEFAULT_COMMANDS, StubRunner
+from agent_kit.contrib.sandbox import ExecResult, SandboxRunner, SandboxToolset
+
+from ._stub import DEFAULT_COMMANDS, StubRunner
 
 
 # ---- Protocol shape (the freeze) ----
