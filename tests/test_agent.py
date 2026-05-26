@@ -257,3 +257,101 @@ def test_cancel_check_passed_through() -> None:
 
     result = a.run_sync("hi", cancel_check=cancel_check, max_rounds=5)
     assert result.cancelled is True
+
+
+# ---- end-to-end behaviors (migrated from test_runner.py) ----
+
+
+def test_run_to_completion_rounds_used_multi() -> None:
+    """Two LLM rounds (tool call then final_text) → rounds_used==2."""
+    tool_calls = [ToolCall(id="c1", name="echo", arguments={"x": 1})]
+    provider = ScriptedProvider([
+        tool_call_response(*tool_calls),
+        text_response("all done"),
+    ])
+    ts = RecordingToolset("test", {"echo": lambda a: f"echo:{a['x']}"})
+    a = Agent(name="x", model=provider, tools=[ts])
+    result = a.run_sync("go", max_rounds=5)
+    assert result.final_text == "all done"
+    assert result.rounds_used == 2
+    assert ts.execute_calls[0].name == "echo"
+
+
+def test_run_raises_on_provider_error() -> None:
+    """Q4 contract: error event → RuntimeError, with stage + exc_type prefix."""
+    from tests._helpers import RaisingProvider
+    a = Agent(
+        name="x",
+        model=RaisingProvider(error_cls=ValueError, message="nope"),
+    )
+    with pytest.raises(RuntimeError, match=r"\[provider\] ValueError: nope"):
+        a.run_sync("hi")
+
+
+def test_toolsets_aclose_called_after_run() -> None:
+    """Per-run aclose: toolsets get closed even on success."""
+    ts1 = RecordingToolset("a", {"f": "1"})
+    ts2 = RecordingToolset("b", {"g": "2"})
+    a = Agent(name="x", model=ScriptedProvider(), tools=[ts1, ts2])
+    a.run_sync("hi")
+    assert ts1.closed == 1
+    assert ts2.closed == 1
+
+
+def test_workspace_provider_path_used_and_persisted(tmp_path) -> None:
+    """workspace_provider returns a caller-owned path; survives the run."""
+    external = tmp_path / "persistent"
+    external.mkdir()
+    sentinel = external / "marker.txt"
+    sentinel.write_text("hello")
+
+    seen: dict[str, Any] = {}
+
+    class _Probe(Hook):
+        async def before_model(self, ctx, messages, tools):
+            seen["workspace"] = ctx.workspace
+            seen["ephemeral"] = ctx.workspace_ephemeral
+            return None
+
+    a = Agent(
+        name="x", model=ScriptedProvider(),
+        workspace_provider=lambda req, run_id: external,
+        hooks=[_Probe()],
+    )
+    a.run_sync("hi")
+    assert seen["workspace"] == external
+    assert seen["ephemeral"] is False
+    assert external.exists() and sentinel.read_text() == "hello"
+
+
+def test_workspace_ephemeral_default_true_without_provider(tmp_path) -> None:
+    """No workspace_provider → SDK self-managed (ephemeral=True, dir deleted)."""
+    seen: dict[str, Any] = {}
+
+    class _Probe(Hook):
+        async def before_model(self, ctx, messages, tools):
+            seen["ephemeral"] = ctx.workspace_ephemeral
+            seen["workspace"] = ctx.workspace
+            return None
+
+    a = Agent(
+        name="x", model=ScriptedProvider(),
+        workspace_root=tmp_path / "ws",
+        hooks=[_Probe()],
+    )
+    a.run_sync("hi")
+    assert seen["ephemeral"] is True
+    assert not seen["workspace"].exists()
+
+
+def test_workspace_provider_raises_yields_setup_error() -> None:
+    """A workspace_provider that raises → RuntimeError with stage=setup prefix."""
+    def boom(req, run_id):
+        raise RuntimeError("provider exploded")
+
+    a = Agent(
+        name="x", model=ScriptedProvider(),
+        workspace_provider=boom,
+    )
+    with pytest.raises(RuntimeError, match=r"\[setup\].*provider exploded"):
+        a.run_sync("hi")
