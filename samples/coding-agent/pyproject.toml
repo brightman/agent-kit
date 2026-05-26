@@ -1,0 +1,18 @@
+[project]
+name = "coding-agent-sample"
+version = "0.1.0"
+description = "agent-kit sample — SandboxRunner Protocol + SandboxToolset API freeze (Stage B, see spec § 16.3)."
+license = {text = "Apache-2.0"}
+readme = "README.md"
+requires-python = ">=3.11"
+
+dependencies = [
+    "agent-kit[litellm]",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
