@@ -1485,7 +1485,8 @@ mcp 大 payload)。零 LLM 成本,覆盖 80% 场景。
 | **2** | loop 实现(非 stream + cancel + max_rounds + **compactor 集成 + 兜底校验 + 4 个 hook 调用 + first-non-None 短路 + short_circuited event**) + 集成测试 ✓ | FakeProvider 跑通 flashidea;TruncatingCompactor 触发后 `context_compacted` event emit;hook 短路触发后对应 short_circuited event emit;hook 异常被 catch + 转 error event |
 | **3** | runner 实现(run + run_to_completion + 资源生命周期 + skill catalog discovery + AgentLoop.aclose) + 端到端测试 ✓ | RunResult 行为符合契约 |
 | **4** | mcp 实现(lazy connect + aclose,wrap `mcp` SDK)+ Runner pre-warm + 真打测试 ✓ | 真打 in-memory FastMCP OK,4 种使用方 lifecycle 用例(per-call / per-run / per-tenant / global)各跑一次 |
-| **4 附** | Runner.workspace_provider(让外部 workspace 注入)+ 不内置 sandbox 决议(§ 16)✓ | workspace_provider tests 全绿,§ 16 落地 |
+| **4 附** | Runner.workspace_provider(让外部 workspace 注入)+ sandbox 决议(§ 16,2026-05-24 不内置 → 2026-05-26 修订:contrib diet)✓ | workspace_provider tests 全绿,§ 16 第一版落地 |
+| **Sandbox B-F** | `contrib/sandbox/` diet 实现(§ 16.5):sample-first 冻接口 → LocalDir → SRT → MCP → live sample | 见 § 16.5 五个 sub-stage,各自独立 tag |
 | **5** | **baizhi-agent 接入** —— 替换内部 runner → agent-kit.Runner + 真 provider / real SkillRegistry / real MCP 接通 + recipes 写 | baizhi-agent pytest 不退化;pptx e2e live test 跑通 |
 | **6** | fam-runtime 接入 | fam-runtime pytest 不退化;per-family MCP lifecycle 用例验证 |
 | ~~**5 (原)**~~ | ~~stream 实现~~ | **推迟,改为 Stage 7+ 候选** |
@@ -1525,53 +1526,129 @@ Stage 重做;baizhi-agent / fam-runtime 在 Stage 5/6 之前完全不受影响�
 | Partial tool_call delta | 后期 | § 4.4 暂用完整 ToolCall 当 delta |
 | Tool 内部进度事件 helper | Stage 2 候选 | § 5.2 已留 `ctx.emit` |
 | Cancel by run_id 的 Runner API | Stage 2 决定形态 | § 9.4 |
-| **Sandbox / 受限执行抽象** | 上层(见 § 16) | 三场景全部已有外部解,SDK 不重造 |
-| **Script executor / Skill scripts toolset** | 上层 | 由 `BaseToolset` + `Runner.workspace_provider` 拼装,见 § 16 recipes |
+| **Sandbox 重抽象**(Manifest / Capability / Snapshot) | 永久 out | § 16.1 已论证 —— openai-agents 32k 行不抄 |
+| **Sandbox diet 抽象** | `contrib/sandbox/`(见 § 16.3,Stage B-F) | core 不动一行,可选 import |
+| **Script executor / Skill scripts toolset** | 上层 OR `SandboxToolset`(§ 16.3) | 已有 diet 实现兜底 |
 
 ---
 
-## 16. Sandbox 与 script 执行(策略,不在 SDK 内)
+## 16. Sandbox 与 script 执行(Diet 抽象 + contrib 三家参考实现)
 
-**决策**:agent-kit **不**内置 sandbox 抽象、不内置 script executor、不内置
-skill script toolset。所有 sandbox/受限执行场景由上层组装。
+**决策(修订 2026-05-26)**:`agent_kit` **core MUST NOT** 内置任何 sandbox /
+executor / Manifest / Capability / Snapshot 概念。但 `agent_kit.contrib.sandbox`
+**SHOULD** 提供一个 **5-方法 `SandboxRunner` Protocol** + `SandboxToolset` +
+三家参考实现(`LocalDir` / `SRT` / `MCP`),让使用方挂上就用,不用从零拼。
+
+> 历史:2026-05-24 版本曾写"绝对不增加任何 sandbox 相关 module";2026-05-26
+> 修订放开 —— **diet 抽象不算破规**,因为它就是一个 `BaseToolset` 子类 +
+> 一个 Protocol,不引入新概念到 core。约束仍然成立:**core 不动一行**。
 
 ### 16.1 决策依据
 
-讨论历史(2026-05-24)考察了三家方案:
+讨论历史考察了三家方案:
 
-| 参考 | 模型 | 我们是否照抄 |
+| 参考 | 模型 | 我们怎么做 |
 |---|---|---|
-| **ADK `BaseCodeExecutor`** | 从 LLM response 抽 markdown code block,跑后回填 | **不**。要求 Gemini 风格 LLM 行为;跟 tool call 协议抢 turn |
-| **openai-agents `BaseSandboxSession`** | 长 lived workspace + capabilities + 7 个 provider extension(E2B/Modal/Daytona/…) | **不**。`BaseSandboxSession` 单文件 1200 行,远超我们 SDK 总量;snapshot/manifest/PTY 不是机制是 product |
-| **`ScriptExecutor` Protocol 自创** | SDK 给契约,使用方写 adapter | **不**。三大真实场景全部已有外部解 → 契约成空壳 |
+| **ADK `BaseCodeExecutor`** | 从 LLM response 抽 markdown code block,跑后回填 | **不抄**。要求 Gemini 风格 LLM 行为;跟 tool call 协议抢 turn |
+| **openai-agents `BaseSandboxSession`** | 长 lived workspace + Manifest + Capability + 7 个 provider extension(E2B/Modal/Daytona/…),核心 20k 行 + 扩展 12.5k 行 ≈ **32,640 行** | **不抄重型抽象**。Manifest / Capability / Snapshot / PTY / exposed_port 全部排除 —— 它们是 product,不是机制 |
+| **Diet `SandboxRunner` Protocol(本节方案)** | 5 个方法的 Protocol + 1 个 `BaseToolset` 子类 + 三家 backend,共 ~500 行 SDK | **采用,放 contrib**。代价是没有声明式 manifest 和内置 snapshot;换来 60× 代码量缩减,且不绑 vendor |
 
-三大真实场景与对应外部解:
+三大真实场景与对应解:
 
-| 需求 | 上层方案 | SDK 提供 |
+| 需求 | 解法 | 提供方 |
 |---|---|---|
-| 长 lived workspace 跑 agent(baizhi-agent tenant_agent 空间) | application 层维护 workspace + toolset cwd=workspace | `Runner.workspace_provider`(§ 9.1) |
-| 本地受限执行 | Anthropic SRT(https://github.com/anthropic-experimental/sandbox-runtime),Toolset 命令前缀 `srt …` | 零 |
-| 远程 / 隔离执行 | MCP server(filesystem / shell / e2b / Docker) | 已支持(§ 7) |
+| 长 lived workspace 跑 agent(baizhi-agent tenant_agent 空间) | `Runner.workspace_provider` 注入持久路径 + `SandboxToolset(LocalDirRunner())` | core(§ 9.1) + contrib(§ 16.3) |
+| 本地受限执行(macOS/Linux dev box) | `SandboxToolset(SrtRunner(profile=...))`,薄包装 Anthropic SRT | contrib(§ 16.3) |
+| 远程 / 隔离执行(生产 / 不可信输入) | `SandboxToolset(McpSandboxRunner(McpToolset.http(...)))`,任何暴露 exec/read/write 工具的 MCP 服务都行 | contrib(§ 16.3) |
 
-### 16.2 SDK 边界变化
+### 16.2 Core SDK 边界(不变)
 
 - **新增** `Runner.workspace_provider`(§ 9.1):允许外部 workspace 注入,
-  Runner 不建不删 → 让上面三场景都能拿到 baizhi-agent 持久空间
+  Runner 不建不删 → 让上面三场景都能拿到使用方持久空间
 - **新增** `ToolCallContext.workspace_ephemeral`(§ 5.2):toolset 自检"我能不
   能在 workspace 里跨 run 缓存"
-- **不增加**任何 sandbox / executor / script 相关 module、Protocol、
-  dataclass。曾在 stage-4 后短暂存在的 `agent_kit/sandbox.py`(`ScriptExecutor`
-  Protocol + `LocalSubprocessExecutor`)已删除 —— 因为它在三场景下都被外部方
-  案吃掉,留着会误导后来人
+- `agent_kit/` 主目录 **MUST NOT** 引入 sandbox 相关 module 或 dataclass。
+  sandbox 全部生活在 `agent_kit/contrib/sandbox/`,可选 import,跟 LiteLlm 一样
+  通过 extras(`pip install agent-kit[sandbox]`)装
 
-### 16.3 Recipes(待写,Stage 6 baizhi-agent 接入时回填)
+### 16.3 `agent_kit.contrib.sandbox` 契约(diet)
 
-- `docs/recipes/workspace.md`:把 baizhi 的 tenant_agent 空间映射进 SDK
-  (`workspace_provider` 用法)
-- `docs/recipes/local-restricted-with-srt.md`:本地 Toolset 用 SRT 跑 trusted script
-- `docs/recipes/sandbox-via-mcp.md`:用 mcp-server-shell / e2b MCP 当远程 sandbox
-- `docs/recipes/skill-scripts.md`:SKILL 内嵌 script 怎么由上层 toolset 物化 +
-  执行(纯 application-layer 模式,不在 SDK)
+包结构(总 ~500 行 SDK + ~300 行 tests,对比 openai-agents 32k 行 → **60× 减少**):
+
+```
+agent_kit/contrib/sandbox/
+├── __init__.py             # re-export
+├── types.py                # SandboxRunner Protocol + ExecResult           ~25 行
+├── toolset.py              # SandboxToolset(BaseToolset)                  ~150 行
+└── runners/
+    ├── localdir.py         # LocalDirRunner — host subprocess,无隔离      ~120 行
+    ├── srt.py              # SrtRunner — Anthropic sandbox-runtime          ~80 行
+    └── mcp.py              # McpSandboxRunner — 任何 MCP exec 服务          ~100 行
+```
+
+**核心 Protocol** (`types.py`):
+
+```python
+@runtime_checkable
+class SandboxRunner(Protocol):
+    name: str                                                  # 工具名前缀
+
+    async def setup(self, workspace: Path) -> None: ...        # mkdir + 预热
+    async def exec(
+        self, cmd: list[str], *,                               # list,不上 shell
+        cwd: str = "", env: dict[str, str] | None = None,
+        timeout: float | None = None, stdin: bytes | None = None,
+    ) -> ExecResult: ...
+    async def read(self, path: str) -> bytes: ...
+    async def write(self, path: str, content: bytes) -> None: ...
+    async def aclose(self) -> None: ...
+```
+
+**`SandboxToolset(BaseToolset)`**:
+
+- 工具名前缀 `sandbox__<runner.name>__`(同 `mcp__<server>__` 规则)
+- 暴露 3 个 LLM 工具:`exec_command` / `read_file` / `write_file`,通过
+  `tools=("exec_command",)` 可裁剪
+- `connect()` 阶段做 `runner.warmup()`(如有);workspace 还没建,真 `setup()`
+  推到 `execute()` 第一次被调,这时拿到 `ctx.workspace`
+- stdout/stderr 截断在 toolset 层做(默认 8KiB / 4KiB),Runner 永远返完整 bytes
+- 失败转 `ToolResult(is_error=True)`,不抛
+
+**三家 Runner 行为契约**:
+
+| 维度 | `LocalDirRunner` | `SrtRunner` | `McpSandboxRunner` |
+|---|---|---|---|
+| `setup(ws)` | `ws.mkdir(parents=True, exist_ok=True)` + 记 workspace | 同 LocalDir | **同 LocalDir**(决策 #3,2026-05-26)+ optionally call MCP `init_workspace` |
+| 隔离层 | 无(allowlist 自检) | SRT profile(filesystem ACL + 网络限制) | 远端服务自己决定 |
+| `read` / `write` | host fs 直读直写 | host fs 直读直写(SRT bind-mount workspace) | 走 MCP `read_file` / `write_file` tool |
+| path traversal | 内置 `_is_within()` 防护 | 同 LocalDir | 远端服务自己保证 |
+| 安全姿势 | secure-by-config(allowlist 显式) | secure-by-profile | secure-by-deployment |
+
+**故意 SHOULD NOT 暴露的方法**(防止抽象漏出去):
+
+| 没做的 | 为什么 |
+|---|---|
+| `pty_exec` / `write_stdin` | PTY 不是机制,product 级特性 → 用户自己包 `BaseToolset` |
+| `persist_workspace` / `hydrate_workspace`(snapshot) | 用 `workspace_provider` 给持久路径就 == snapshot |
+| `apply_patch` | LLM 自己用 `read` + `write` 组合;真要 diff 走 `exec(["patch", ...])` |
+| `exposed_port` / port forwarding | 不是 SDK 的事;远程服务自己暴露 |
+| `User` / 权限模型 | Runner 自己定:LocalDir 走 host 用户,SRT 走 profile,MCP 走服务端 |
+| streaming exec | LLM 拿到的总是完整结果;`tail -f` 类需求走 MCP |
+
+### 16.4 参考 sample
+
+`samples/coding-agent/` 提供端到端用例:**LocalDirRunner 跑 fix-a-bug 任务**。
+不写单独的 recipes —— 一份能跑的 sample 抵 10 篇 markdown。
+
+### 16.5 实施阶段(2026-05-26)
+
+| Stage | 内容 | tag |
+|---|---|---|
+| **B(sample-first)** | `samples/coding-agent/` 用 stub runner 跑通,冻结 SandboxRunner / SandboxToolset 接口 | `sandbox-api-frozen` |
+| **C(sandbox-1)** | `contrib/sandbox/{types,toolset}.py` + `LocalDirRunner` + tests | `sandbox-1` |
+| **D(sandbox-2)** | `SrtRunner` + tests | `sandbox-2` |
+| **E(sandbox-3)** | `McpSandboxRunner` + tests | `sandbox-3` |
+| **F(sandbox-sample-live)** | sample 替换 stub,end-to-end 跑真任务 | `sandbox-sample-live` |
 
 ---
 
@@ -1780,7 +1857,7 @@ openai-agents 在 prelude 跟 skill 列表一起注入 ~30 行 "How to use skill
 |---|---|
 | `Skill(scripts/references/assets)` 结构化字段 | YAGNI;现有 `files dict[str, bytes]` 用 `scripts/foo.py` key 一样达到效果 |
 | eager vs lazy 两种模式 | 我们 `load_skill` 工具本来就是 lazy(frontmatter 进 prelude,body 按需 load),不需要二选一 |
-| `from_=Dir(...)` 物化到 sandbox workspace | 我们 spec § 16 决定不内置 sandbox |
+| `from_=Dir(...)` 物化到 sandbox workspace(声明式 manifest) | 我们 § 16.1 决定 diet sandbox 不带 Manifest;skill body 想物化文件,自己用 `SandboxToolset.write_file` 写 |
 
 ---
 
