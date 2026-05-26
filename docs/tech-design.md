@@ -862,6 +862,25 @@ Router,LLM 也看不到。
 跟 `tool_filter` 不冲突。`tool_filter` 是简单白名单,per-request 是动态
 策略 —— 两个都可以存在,filter 先生效,然后 per-request 再过一遍。
 
+#### 7.5.3 Convenience factories(Stage 5 修订 2026-05-24)
+
+把 transport 跟 `McpServerConfig` 嵌套省掉,3 个 classmethod 工厂跟 ADK 的
+`StdioConnectionParams / SseConnectionParams / StreamableHTTPConnectionParams`
+对位:
+
+```python
+McpToolset.http("brave-search", url="...", headers={...}, tool_filter=[...])
+McpToolset.sse("ws", url="...", headers={...})
+McpToolset.stdio("github", command=["mcp-github"], env={...})
+```
+
+每个工厂只接受**该 transport 真用得到的 kwargs**(http/sse 没有 command,
+stdio 没有 url/headers),IDE 补全更准。`secrets` / `tool_filter` /
+`connect_timeout` 三个工厂都有,共享语义。
+
+**老路径仍然 work**:`McpToolset(McpServerConfig(name=..., transport=...))`
+继续是 supported entry point —— 工厂只是糖,不破坏现有 caller。
+
 ### 7.6 便利函数(可选)
 
 ```python

@@ -646,6 +646,69 @@ async def test_tool_filter_excludes_from_router_path() -> None:
         await ts.aclose()
 
 
+# ---- convenience factories (spec § 7.5.3) ----
+
+
+def test_factory_http_equivalent_to_ctor() -> None:
+    """`McpToolset.http(...)` builds the same shape as the McpServerConfig ctor path."""
+    by_factory = McpToolset.http(
+        "brave", url="https://brave.com/mcp",
+        headers={"X-Key": "v"}, connect_timeout=15.0,
+    )
+    by_ctor = McpToolset(
+        McpServerConfig(
+            name="brave", transport="http", url="https://brave.com/mcp",
+            headers={"X-Key": "v"}, connect_timeout=15.0,
+        )
+    )
+    # 对 caller 可见的字段一致;internal stack / session 不比较
+    assert by_factory.name == by_ctor.name == "mcp__brave"
+    assert by_factory._config == by_ctor._config
+
+
+def test_factory_stdio() -> None:
+    ts = McpToolset.stdio("github", command=["mcp-github"],
+                          env={"GH_TOKEN": "secret"})
+    assert ts.name == "mcp__github"
+    assert ts._config.transport == "stdio"
+    assert ts._config.command == ["mcp-github"]
+    assert ts._config.env == {"GH_TOKEN": "secret"}
+
+
+def test_factory_sse() -> None:
+    ts = McpToolset.sse("ws", url="https://x.test/sse",
+                        headers={"Auth": "Bearer x"})
+    assert ts.name == "mcp__ws"
+    assert ts._config.transport == "sse"
+    assert ts._config.headers == {"Auth": "Bearer x"}
+
+
+def test_factory_propagates_tool_filter_and_secrets() -> None:
+    """`secrets` + `tool_filter` pass through to ctor unchanged."""
+    ts = McpToolset.http(
+        "x", url="https://api/mcp/${TOKEN}",
+        secrets={"TOKEN": "abc"},
+        tool_filter=["search", "fetch"],
+    )
+    # ${VAR} substitution happened (secrets winning over env)
+    assert ts._config.url == "https://api/mcp/abc"
+    # tool_filter stored as frozenset(behavior verified separately;
+    # we just check the set contents here)
+    assert set(ts._tool_filter or []) == {"search", "fetch"}
+
+
+def test_factory_validation_propagates() -> None:
+    """Factories run the same McpServerConfig validation —
+    bad server names / missing required args raise the same errors."""
+    import pytest
+    with pytest.raises(ValueError, match="must not contain '__'"):
+        McpToolset.http("bad__name", url="https://x")
+    # http without url is impossible via factory (url is required kwarg)
+    # — Python TypeError, not our ValueError. Test stdio mistake instead:
+    with pytest.raises(TypeError):
+        McpToolset.stdio("x")           # missing command kwarg
+
+
 # ---- helpers ----
 
 

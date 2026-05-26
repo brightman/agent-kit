@@ -206,6 +206,92 @@ class McpToolset(BaseToolset):
             if s.name.startswith(prefix) and s.name[len(prefix):] in flt
         ]
 
+    # ---- convenience factories (spec § 7.5.3) ----
+
+    @classmethod
+    def http(
+        cls,
+        name: str,
+        *,
+        url: str,
+        headers: dict[str, str] | None = None,
+        connect_timeout: float = 30.0,
+        secrets: dict[str, str] | None = None,
+        tool_filter: Union[
+            Sequence[str], Callable[[ToolSchema], bool], None
+        ] = None,
+    ) -> "McpToolset":
+        """Streamable HTTP transport. 跟 ADK 的 `StreamableHTTPServerParams` 对位。
+
+        Example:
+            McpToolset.http("brave-search", url="https://brave.com/mcp",
+                             headers={"X-Key": "${BRAVE_KEY}"},
+                             tool_filter=["search"])
+        """
+        return cls(
+            McpServerConfig(
+                name=name, transport="http", url=url,
+                headers=dict(headers or {}),
+                connect_timeout=connect_timeout,
+            ),
+            secrets=secrets,
+            tool_filter=tool_filter,
+        )
+
+    @classmethod
+    def sse(
+        cls,
+        name: str,
+        *,
+        url: str,
+        headers: dict[str, str] | None = None,
+        connect_timeout: float = 30.0,
+        secrets: dict[str, str] | None = None,
+        tool_filter: Union[
+            Sequence[str], Callable[[ToolSchema], bool], None
+        ] = None,
+    ) -> "McpToolset":
+        """SSE transport. 跟 ADK 的 `SseConnectionParams` 对位。"""
+        return cls(
+            McpServerConfig(
+                name=name, transport="sse", url=url,
+                headers=dict(headers or {}),
+                connect_timeout=connect_timeout,
+            ),
+            secrets=secrets,
+            tool_filter=tool_filter,
+        )
+
+    @classmethod
+    def stdio(
+        cls,
+        name: str,
+        *,
+        command: list[str],
+        env: dict[str, str] | None = None,
+        connect_timeout: float = 30.0,
+        secrets: dict[str, str] | None = None,
+        tool_filter: Union[
+            Sequence[str], Callable[[ToolSchema], bool], None
+        ] = None,
+    ) -> "McpToolset":
+        """Local stdio subprocess transport. 跟 ADK 的 `StdioServerParameters`
+        / `StdioConnectionParams` 对位。
+
+        Example:
+            McpToolset.stdio("github", command=["mcp-github"],
+                              env={"GITHUB_TOKEN": "${GH_TOKEN}"})
+        """
+        return cls(
+            McpServerConfig(
+                name=name, transport="stdio", command=list(command),
+                env=dict(env or {}),
+                connect_timeout=connect_timeout,
+            ),
+            secrets=secrets,
+            tool_filter=tool_filter,
+        )
+
     async def execute(self, call: ToolCall, ctx: ToolCallContext) -> ToolResult:
         if not self._connected or self._session is None:
             return ToolResult(
