@@ -1,11 +1,15 @@
 """CLI for the coding-agent sample.
 
 Usage:
-    # one-shot
+    # one-shot, default backend (stub, no subprocess)
     PYTHONPATH=../.. python -m app.main "Read task.md and do as told."
 
+    # one-shot with real LocalDir backend (real subprocess, real fs)
+    PYTHONPATH=../.. python -m app.main --backend localdir \\
+        "Read task.md, run python on src/main.py, and summarize"
+
     # interactive REPL
-    PYTHONPATH=../.. python -m app.main
+    PYTHONPATH=../.. python -m app.main [--backend stub|localdir]
 
 Env:
     MODEL              override default model (default: gemini/gemini-2.5-flash)
@@ -14,11 +18,11 @@ Env:
 
 from __future__ import annotations
 
-import sys
+import argparse
 
 from agent_kit import Message
 
-from .agent import build_agent
+from .agent import Backend, build_agent
 
 
 def _trace(result) -> None:
@@ -32,17 +36,17 @@ def _trace(result) -> None:
     )
 
 
-def one_shot(prompt: str) -> int:
-    agent = build_agent()
+def one_shot(prompt: str, backend: Backend) -> int:
+    agent = build_agent(backend=backend)
     result = agent.run_sync(prompt)
     print(result.final_text or "(no final text)")
     _trace(result)
     return 0 if result.error is None else 1
 
 
-def interactive() -> int:
-    agent = build_agent()
-    print("Coding Agent (agent-kit). Workspace is in-memory (StubRunner).")
+def interactive(backend: Backend) -> int:
+    agent = build_agent(backend=backend)
+    print(f"Coding Agent (agent-kit, backend={backend}).")
     print("Type a message; Ctrl-D / `quit` to exit.\n")
     history: list[Message] = []
     while True:
@@ -64,9 +68,20 @@ def interactive() -> int:
 
 
 def main() -> int:
-    if len(sys.argv) > 1:
-        return one_shot(" ".join(sys.argv[1:]))
-    return interactive()
+    p = argparse.ArgumentParser(description="agent-kit coding-agent sample")
+    p.add_argument(
+        "--backend",
+        choices=("stub", "localdir"),
+        default="stub",
+        help="sandbox backend: 'stub' (in-memory, default) or 'localdir' "
+             "(real host subprocess via LocalDirRunner)",
+    )
+    p.add_argument("prompt", nargs="*", help="One-shot prompt (omit for REPL).")
+    args = p.parse_args()
+
+    if args.prompt:
+        return one_shot(" ".join(args.prompt), args.backend)
+    return interactive(args.backend)
 
 
 if __name__ == "__main__":

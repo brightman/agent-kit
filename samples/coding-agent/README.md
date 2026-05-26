@@ -105,22 +105,44 @@ PYTHONPATH=../.. python -m app.main "Read task.md and do as told."
   matches the contract decision in spec § 16.3 (all three real runners do the
   same)
 
-## Swap StubRunner for LocalDirRunner
+## Switch backends (Stage F)
 
-Once Stage C ships, you can swap to a real-subprocess runner in 3 lines:
+`build_agent(backend=...)` picks the runner. Stage F adds the `localdir` option:
 
 ```python
-# in app/agent.py
-from agent_kit.contrib.sandbox.runners import LocalDirRunner
+from app.agent import build_agent
 
-runner = LocalDirRunner(command_allowlist=["python", "pytest", "ls", "cat"])
-# instead of: StubRunner(files=..., commands=DEFAULT_COMMANDS)
+agent = build_agent(backend="stub")        # in-memory dict, no subprocess
+agent = build_agent(backend="localdir")    # real host subprocess
 ```
 
-`LocalDirRunner` runs commands as actual host subprocesses (no isolation —
-trusted code only) under the agent's workspace dir, with path-traversal
-defense and an optional `command_allowlist`. See
-`tests/contrib/sandbox/test_localdir.py` for the full contract.
+Or via CLI:
+
+```bash
+PYTHONPATH=../.. python -m app.main --backend localdir \
+    "Read greet.py, run it, fix the typo if any, run again"
+```
+
+When `backend="localdir"`:
+- `seed_files` is materialized to disk by a `workspace_provider` lambda
+- `LocalDirRunner` runs commands as actual host subprocesses (no isolation —
+  trusted code only), with `command_allowlist=["ls","cat","echo","python",
+  "python3","pytest","grep","head","tail","wc"]` and `env_passthrough=
+  ("PATH","HOME")`
+- Path-traversal defense + timeout / stdin plumbing come from
+  `agent_kit.contrib.sandbox.runners.localdir`
+
+## Live e2e tests (Stage F)
+
+`app/test_live.py` proves the frozen API works end-to-end with a real
+subprocess + real fs — no API key needed (ScriptedProvider plays the model):
+
+| Test | What it proves |
+|---|---|
+| `test_localdir_end_to_end_bug_fix` | 5-tool conversation fixes a real Python bug; `python3 greet.py` actually runs in a subprocess and switches from "wrold" → "world" |
+| `test_localdir_allowlist_blocks_disallowed_command` | `rm -rf /` is blocked at the runner; LLM sees `is_error=True, exit_code=126` |
+| `test_localdir_path_traversal_blocked_e2e` | `read_file("../../etc/passwd")` is rejected at toolset boundary as `is_error=True` |
+| `test_build_agent_localdir_backend_wires_real_runner` | `build_agent(backend="localdir")` produces a usable Agent end-to-end |
 
 ## Stage history
 
@@ -128,8 +150,9 @@ defense and an optional `command_allowlist`. See
 |---|---|---|
 | B | `sandbox-api-frozen` | SandboxRunner / SandboxToolset frozen via 14 tests |
 | C | `sandbox-1` | Moved to `agent_kit/contrib/sandbox/`; added LocalDirRunner |
-| D | (planned) | SrtRunner — Anthropic sandbox-runtime |
-| E | (planned) | McpSandboxRunner — any MCP exec server |
+| D | `sandbox-2` | SrtRunner — Anthropic sandbox-runtime wrapper |
+| E | `sandbox-3` | McpSandboxRunner — any MCP exec server adapter |
+| F | `sandbox-sample-live` | `build_agent(backend="localdir")` + `--backend` CLI flag + 4 live e2e tests with real subprocess |
 
 ## Mapping to spec § 16
 
