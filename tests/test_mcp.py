@@ -481,7 +481,7 @@ async def test_runner_prewarms_mcp_toolset(tmp_path) -> None:
 
     runner = Runner(
         ScriptedProvider(chat_fn=chat_fn),
-        toolsets=[ts], workspace_root=tmp_path / "ws",
+        toolsets=[ts], workspace=tmp_path / "ws",
     )
     result = await runner.run_to_completion(make_request(max_rounds=2))
     assert result.error is None
@@ -506,7 +506,7 @@ async def test_runner_prewarm_failure_emits_setup_error(tmp_path) -> None:
     )
     runner = Runner(
         ScriptedProvider([text_response("never")]),
-        toolsets=[flaky], workspace_root=tmp_path / "ws",
+        toolsets=[flaky], workspace=tmp_path / "ws",
     )
     events = [e async for e in runner.run(make_request())]
     error_evts = [e for e in events if e.kind == "error"]

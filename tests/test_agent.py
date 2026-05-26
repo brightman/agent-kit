@@ -228,7 +228,7 @@ def test_workspace_provider_passthrough(tmp_path) -> None:
 
     a = Agent(
         name="x", model=ScriptedProvider(),
-        workspace_provider=lambda req, run_id: external,
+        workspace=lambda req, run_id: external,
         hooks=[_Cap()],
     )
     a.run_sync("hi")
@@ -315,7 +315,7 @@ def test_workspace_provider_path_used_and_persisted(tmp_path) -> None:
 
     a = Agent(
         name="x", model=ScriptedProvider(),
-        workspace_provider=lambda req, run_id: external,
+        workspace=lambda req, run_id: external,
         hooks=[_Probe()],
     )
     a.run_sync("hi")
@@ -336,7 +336,7 @@ def test_workspace_ephemeral_default_true_without_provider(tmp_path) -> None:
 
     a = Agent(
         name="x", model=ScriptedProvider(),
-        workspace_root=tmp_path / "ws",
+        workspace=tmp_path / "ws",
         hooks=[_Probe()],
     )
     a.run_sync("hi")
@@ -351,7 +351,7 @@ def test_workspace_provider_raises_yields_setup_error() -> None:
 
     a = Agent(
         name="x", model=ScriptedProvider(),
-        workspace_provider=boom,
+        workspace=boom,
     )
     with pytest.raises(RuntimeError, match=r"\[setup\].*provider exploded"):
         a.run_sync("hi")

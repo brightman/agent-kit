@@ -10,9 +10,9 @@
   可以直接 `agent.runner.run_to_completion(RunRequest(...))` 走全自由路径
 - **Long-lived Runner**:`Agent` 内部持有一个 Runner 实例,跨多次 `.run()`
   调用复用 —— toolsets 的 MCP session 不会每次重建
-- **没有 tenant_id 概念**(spec § 1,2026-05-25 修订):多租户应用层每个
-  tenant new 一份 Agent + per-tenant `SkillRegistry` / `workspace_provider`
-  closure。SDK 自身完全 tenant-agnostic
+- **没有 tenant_id 概念**(spec § 1):多租户应用层每个 tenant new 一份
+  Agent + per-tenant `SkillRegistry` / `workspace` closure。SDK 自身
+  完全 tenant-agnostic
 - **`model=string` 走 LiteLlm extras**:`"gemini/..."` / `"anthropic/..."` /
   `"openai/..."` 等 LiteLLM 路由格式 → 自动包成 `LiteLlm` provider
   (需 `pip install "agent-kit[litellm]"`);否则给清晰 ImportError
@@ -91,9 +91,9 @@ class Agent:
     # advanced —— Runner ctor 的其他参数,默认值跟 Runner 一致
     hooks: list[Hook] = field(default_factory=list)
     compactor: ContextCompactor | None = None
-    workspace_provider: Callable[[RunRequest, str], Path] | None = None
-    workspace_root: Path = Path("/tmp/agent-kit-runs")
-    storage_root: Path = Path("./persistent")
+    # workspace:None=ephemeral tmpdir;Path=ephemeral subdir under that path;
+    # Callable=caller-owned persistent workspace. See `Runner.__init__`.
+    workspace: Path | Callable[[RunRequest, str], Path] | None = None
 
     # 默认的 per-run 参数(`.run()` 不传就用这个;传了就 override)
     default_max_rounds: int = 10
@@ -130,9 +130,7 @@ class Agent:
             system_prelude=self.instruction,
             compactor=self.compactor,
             hooks=self.hooks,
-            workspace_root=self.workspace_root,
-            storage_root=self.storage_root,
-            workspace_provider=self.workspace_provider,
+            workspace=self.workspace,
         )
 
     # ---- public ----

@@ -153,12 +153,12 @@ Every `execute()` receives a `ctx` with:
 
 | Field | What |
 |---|---|
-| `ctx.workspace: Path` | Per-run filesystem scratch (cleaned up unless you set `workspace_provider`) |
+| `ctx.workspace: Path` | Per-run filesystem scratch (cleaned up unless `Agent(workspace=callable)` was passed) |
 | `ctx.workspace_ephemeral: bool` | True if SDK manages the dir; tells your toolset if it can cache across runs |
-| `ctx.storage: Path` | Persistent storage root (toolset chooses its subdir layout) |
 | `ctx.cancel: asyncio.Event` | Check `.is_set()` for cooperative cancel |
 | `ctx.emit: Callable[[Event], None]` | Currently no-op; reserved for progress events |
 | `ctx.run_id: str` | Unique per-run; useful as a tracing key |
+| `ctx.run_state: dict[str, Any]` | Free-form per-run scratchpad shared across toolsets / hooks |
 
 ---
 
@@ -402,7 +402,7 @@ agent = Agent(
         command_allowlist=["ls", "cat", "python", "pytest"],
         env_passthrough=("PATH", "HOME"),
     ))],
-    workspace_provider=lambda req, run_id: Path(f"/data/agents/{req.agent_id}"),
+    workspace=lambda req, run_id: Path(f"/data/agents/{req.agent_id}"),
 )
 result = agent.run_sync("Read greet.py, run it, fix any typo, run it again.")
 ```
@@ -447,10 +447,19 @@ See [`samples/coding-agent/`](../samples/coding-agent) for an end-to-end
 
 ## 9. Streaming events
 
-`Agent.run_sync` returns a `RunResult` at the end. For real-time event
-streaming, drop down to `runner.run()`:
+`Agent.run_sync(...)` aggregates everything into a `RunResult` at the end.
+That's fine for batch / CLI / tests, but production usually wants the
+event stream as it happens — for trace UIs, audit logs, progress bars,
+WebSocket fan-out, etc.
+
+### 9.1 The basics
+
+Drop down to `runner.run()` instead of `run_sync` / `run_to_completion`:
 
 ```python
+from agent_kit import RunRequest
+
+req = RunRequest(agent_id="my-agent", user_message="Hello")
 async for event in agent.runner.run(req):
     if event.kind == "tool_call":
         print(f"  → calling {event.payload['name']}")
@@ -460,28 +469,239 @@ async for event in agent.runner.run(req):
         print(f"!!! {event.payload['stage']}: {event.payload['message']}")
 ```
 
-Event kinds:
+`runner.run()` is an async generator. It **never raises** — errors come out
+as `Event(kind="error", ...)`. Compare to `run_to_completion` which DOES
+raise.
+
+### 9.2 All event kinds + their payload
+
+Every `Event` has:
+
+```python
+@dataclass(frozen=True)
+class Event:
+    event_id: str               # ULID, sortable by time
+    kind: EventKind             # one of the 12 strings below
+    payload: dict[str, Any]     # kind-specific (see table)
+    parent_event_id: str | None # for rendering trees
+    timestamp_ns: int           # monotonic ns
+```
+
+Reference of every `kind` and its `payload` fields:
+
+| `kind` | When emitted | `payload` keys |
+|---|---|---|
+| `round_start` | Top of each loop round | `round: int` |
+| `llm_request` | About to call `provider.chat` | `round: int`, `message_count: int`, `tool_count: int` |
+| `llm_response` | Got LLM reply | `round: int`, `text: str`, `tool_calls: list[dict]`, `usage: dict`, `finish_reason: str` |
+| `llm_delta` | (deferred, stream mode only — see § 14) | `round: int`, `delta_text: str`, `delta_tool_calls: list[dict]` |
+| `llm_short_circuited` | A `before_model` hook returned a response | `round: int`, `by_hook: str`, `text: str` |
+| `tool_call` | About to dispatch one tool call | `round: int`, `call_id: str`, `name: str`, `arguments: dict` |
+| `tool_result` | Tool returned | `round: int`, `call_id: str`, `content: str`, `is_error: bool` |
+| `tool_short_circuited` | A `before_tool` hook returned a result | `round: int`, `call_id: str`, `by_hook: str` |
+| `context_compacted` | Compactor ran | `strategy: str`, `before_count: int`, `after_count: int`, `before_tokens: int`, `after_tokens: int` |
+| `round_end` | Bottom of each loop round | `round: int` |
+| `final_text` | LLM produced final answer (no more tool calls) | `text: str` |
+| `cancelled` | Cancel triggered | `round: int`, `reason: str` (`"external"` / `"external_mid_tool"` / `"cancel_check"` / `"cancel_check_mid_tool"`) |
+| `error` | Anything failed | `stage: str`, `exc_type: str`, `message: str`, `traceback: str`, optionally `method` / `hook_class` |
+
+The `error.stage` values: `setup` / `provider` / `tool` / `hook` /
+`compactor` / `loop`. See § 12 for what each means.
+
+### 9.3 Rendering the event tree
+
+`parent_event_id` lets you reconstruct a tree. Rules built into the loop:
+
+- `round_start.parent` = `None`
+- `llm_request.parent` / `llm_response.parent` / `llm_short_circuited.parent`
+  = same round's `round_start`
+- `tool_call.parent` = the `llm_response` it came from
+- `tool_result.parent` / `tool_short_circuited.parent` = corresponding
+  `tool_call`
+- `round_end.parent` = round's `round_start`
+- `final_text.parent` / `cancelled.parent` / `error.parent` = nearest
+  prior `round_start`
+
+A minimal ASCII tree renderer:
+
+```python
+from collections import defaultdict
+
+def render_tree(events: list) -> str:
+    children = defaultdict(list)
+    roots = []
+    for e in events:
+        if e.parent_event_id is None:
+            roots.append(e)
+        else:
+            children[e.parent_event_id].append(e)
+
+    out = []
+    def walk(e, depth):
+        out.append("  " * depth + f"[{e.kind}] {_summary(e)}")
+        for c in children[e.event_id]:
+            walk(c, depth + 1)
+    for r in roots:
+        walk(r, 0)
+    return "\n".join(out)
+
+def _summary(e):
+    p = e.payload
+    if e.kind == "llm_response":
+        return f"{len(p.get('tool_calls', []))} tool call(s), text={p.get('text','')[:30]!r}"
+    if e.kind == "tool_call":
+        return f"{p['name']}({list(p['arguments'])})"
+    if e.kind == "tool_result":
+        return f"call_id={p['call_id']} err={p['is_error']}"
+    if e.kind == "final_text":
+        return p["text"][:50]
+    if e.kind == "error":
+        return f"stage={p['stage']} {p['exc_type']}: {p['message'][:60]}"
+    return ""
+```
+
+Use it after a run:
+
+```python
+result = agent.run_sync("Read README.md and summarize it.")
+print(render_tree(result.events))
+```
+
+Sample output:
 
 ```
-round_start              # new LLM round starting
-llm_request              # about to call provider.chat
-llm_response             # got LLM response
-llm_short_circuited      # before_model hook intercepted
-tool_call                # dispatching a tool call
-tool_result              # tool returned
-tool_short_circuited     # before_tool hook intercepted
-context_compacted        # compactor ran
-round_end                # round finished
-final_text               # LLM produced final answer
-cancelled                # cancel triggered (reason in payload)
-error                    # something went wrong (stage in payload)
+[round_start]
+  [llm_request] 0 tool call(s), text=''
+  [llm_response] 1 tool call(s), text=''
+    [tool_call] sandbox__localdir__read_file(['path'])
+      [tool_result] call_id=c1 err=False
+  [round_end]
+[round_start]
+  [llm_request]
+  [llm_response] 0 tool call(s), text='The README explains…'
+  [final_text] The README explains…
+  [round_end]
 ```
 
-Every event has `event_id` + `parent_event_id`, so you can render the event
-stream as a tree in your trace UI.
+### 9.4 Persisting events live (SQLite example)
+
+For trace UIs / audit logs, persist each event as it arrives:
+
+```python
+import sqlite3, json
+
+class TraceStore:
+    def __init__(self, db_path):
+        self.conn = sqlite3.connect(db_path)
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS events (
+                event_id TEXT PRIMARY KEY,
+                parent_event_id TEXT,
+                run_id TEXT,
+                kind TEXT,
+                payload TEXT,
+                timestamp_ns INTEGER
+            )
+        """)
+
+    def write(self, run_id, event):
+        self.conn.execute(
+            "INSERT INTO events VALUES (?, ?, ?, ?, ?, ?)",
+            (event.event_id, event.parent_event_id, run_id,
+             event.kind, json.dumps(event.payload), event.timestamp_ns),
+        )
+        self.conn.commit()
+
+store = TraceStore("./traces.db")
+async for event in agent.runner.run(req):
+    store.write(req.agent_id, event)
+```
+
+For OpenTelemetry, swap the `write()` body for `span.add_event(...)`.
+For NDJSON files, swap for `f.write(json.dumps(event_to_dict(event)) + "\n")`.
+
+### 9.5 Live UI fan-out (WebSocket / SSE)
+
+`runner.run()` is an async iterator, so it composes naturally with anything
+streaming. WebSocket pattern (FastAPI):
+
+```python
+from fastapi import WebSocket
+from agent_kit import RunRequest
+
+@app.websocket("/runs/{run_id}")
+async def stream_run(ws: WebSocket, run_id: str):
+    await ws.accept()
+    req = RunRequest(agent_id="x", user_message=...)
+    async for event in agent.runner.run(req):
+        await ws.send_json({
+            "id": event.event_id,
+            "kind": event.kind,
+            "payload": event.payload,
+            "parent": event.parent_event_id,
+        })
+    await ws.close()
+```
+
+SSE flavor (Starlette `EventSourceResponse`):
+
+```python
+from sse_starlette.sse import EventSourceResponse
+
+async def event_gen(req):
+    async for event in agent.runner.run(req):
+        yield {"event": event.kind, "data": json.dumps(event.payload)}
+
+@app.get("/runs/{run_id}/stream")
+async def stream(run_id: str):
+    return EventSourceResponse(event_gen(req))
+```
+
+The whole event stream — including errors — is finite and well-typed:
+every run ends with either `final_text` (success), `cancelled`, or
+`error` as the last event. No need for sentinel "done" markers.
+
+### 9.6 Filtering and aggregation patterns
+
+Some common one-liners on `result.events`:
+
+```python
+# All tool calls and their results, paired
+calls = {e.payload["call_id"]: e for e in result.events if e.kind == "tool_call"}
+results = {e.payload["call_id"]: e for e in result.events if e.kind == "tool_result"}
+for cid, call in calls.items():
+    print(f"{call.payload['name']} → {results[cid].payload['content'][:80]}")
+
+# Total prompt tokens used
+total_in = sum(
+    e.payload.get("usage", {}).get("prompt_tokens", 0)
+    for e in result.events if e.kind == "llm_response"
+)
+
+# Rounds where the agent called a sandbox tool
+sandbox_rounds = {
+    e.payload["round"] for e in result.events
+    if e.kind == "tool_call" and e.payload["name"].startswith("sandbox__")
+}
+
+# Did any hook short-circuit?
+short_circuits = [e for e in result.events
+                  if e.kind in ("llm_short_circuited", "tool_short_circuited")]
+```
+
+### 9.7 When to use `run_sync` vs `runner.run()`
+
+| You want | API |
+|---|---|
+| Final answer only, sync caller | `agent.run_sync(prompt)` |
+| Final answer + post-mortem on events | `agent.run_sync(prompt)`, then iterate `result.events` |
+| Live progress / streaming UI | `async for evt in agent.runner.run(RunRequest(...))` |
+| Custom `RunRequest` fields (metadata, prior_messages, etc.) | `agent.runner.run_to_completion(RunRequest(...))` |
+| Build your own `Runner` from scratch | `Runner(provider, toolsets, ...).run(req)` |
 
 > **Streaming LLM deltas** (token-by-token `llm_delta` events) are deferred —
-> see [spec § 14](tech-design.md).
+> see [spec § 14](tech-design.md). `RunRequest(stream=True)` fast-fails
+> today with a clear error event.
 
 ---
 
@@ -617,10 +837,18 @@ class RetryingLlmProvider:
 
 ### Workspace
 
-Pass `workspace_provider=lambda req, run_id: Path(...)` to override the
-default ephemeral `/tmp/agent-kit-runs/<run_id>` workspace with a
-persistent dir of your choosing. Then `ctx.workspace_ephemeral` becomes
-`False`, and toolsets can safely cache across runs.
+`Agent(workspace=...)` (and `Runner(workspace=...)`) accepts three shapes:
+
+```python
+Agent(workspace=None)                        # default: /tmp/agent-kit-runs/<run_id>, SDK rmtrees
+Agent(workspace=Path("/var/cache/myapp"))    # /var/cache/myapp/<run_id>, SDK rmtrees the run subdir
+Agent(workspace=lambda req, run_id: Path(    # caller-owned persistent path; SDK never touches it
+    f"/data/{req.agent_id}"
+))
+```
+
+When `workspace=` is a callable, `ctx.workspace_ephemeral` becomes `False`,
+so toolsets know they can safely cache across runs.
 
 ### Hooks for ops
 
@@ -640,7 +868,7 @@ events to your trace store (SQLite, OpenTelemetry, your own). Use
 ### Multi-tenant
 
 agent-kit is tenant-agnostic by design. Make one `Agent` (or `Runner`) per
-tenant, with a tenant-bound `SkillRegistry` and `workspace_provider`:
+tenant, with a tenant-bound `SkillRegistry` and `workspace`:
 
 ```python
 def make_agent_for(tenant_id: str) -> Agent:
@@ -648,7 +876,7 @@ def make_agent_for(tenant_id: str) -> Agent:
         name=f"tenant-{tenant_id}",
         model=...,
         skills=MyDbSkillRegistry(db, tenant_id=tenant_id),
-        workspace_provider=lambda req, run_id: Path(f"/data/{tenant_id}/{req.agent_id}"),
+        workspace=lambda req, run_id: Path(f"/data/{tenant_id}/{req.agent_id}"),
     )
 ```
 

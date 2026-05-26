@@ -177,7 +177,7 @@ async def test_agent_loop_uses_baizhi_pptx_skill_and_websearch_mcp(
     runner = Runner(
         provider,
         toolsets=[skill_catalog, websearch],
-        workspace_root=tmp_path / "runs",
+        workspace=tmp_path / "runs",
     )
 
     result = await runner.run_to_completion(

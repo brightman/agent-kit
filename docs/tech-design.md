@@ -495,18 +495,21 @@ class BaseToolset(ABC):
 @dataclass
 class ToolCallContext:
     # `tenant_id` 已删除(2026-05-25 修订);见 § 3.7 RunRequest
+    # `skill_name` 已删除(2026-05-27 修订):无 toolset 实际读它;
+    #   per-tool free-form metadata 走 `run_state` dict 即可
+    # `storage` 已删除(2026-05-27 修订):YAGNI —— 无内置或 contrib
+    #   toolset 用过 ctx.storage;需要持久化路径的 toolset 自己 hardcode
     run_id: str
-    skill_name: str | None        # 当前调用所归属的 skill(若工具调用来自 SKILL.md 描述触发)
     cancel: asyncio.Event         # toolset 长任务 SHOULD 周期性 check
-    workspace: Path               # 见 § 9.3:ephemeral 模式 = SDK 自建/自删的 /tmp 子目录;
-                                  # provided 模式 = 使用方注入的持久目录,SDK 不动
-    storage: Path                 # 持久存储根目录,toolset 决定子结构
+    workspace: Path               # 见 § 9.3:ephemeral 模式 = SDK 自建/自删的子目录;
+                                  # callable 模式 = 使用方注入的持久目录,SDK 不动
     emit: Callable[[Event], None] # toolset 内部进度事件,event_id 由 toolset 申请
     workspace_ephemeral: bool = True
     # ↑ True = workspace 是 SDK 自建,run 结束 rmtree;toolset 不应在此跨 run 缓存
-    # ↑ False = 使用方通过 Runner.workspace_provider 注入持久目录;toolset 可
-    #   放心物化 + 缓存(skill files / dependency cache 等)
-    # ↑ 进度事件可在 Stage 2 加 helper("tool_progress")
+    # ↑ False = 使用方通过 Runner(workspace=callable) 注入持久目录;toolset
+    #   可放心物化 + 缓存(skill files / dependency cache 等)
+    run_state: dict[str, Any] = field(default_factory=dict)
+    # ↑ free-form per-run scratchpad shared across toolsets / hooks
 ```
 
 ### 5.3 ToolsetRouter
@@ -1145,18 +1148,19 @@ class Runner:
         system_prelude: str = "",
         compactor: ContextCompactor | None = None,
         hooks: list[Hook] | None = None,
-        workspace_root: Path = Path("/tmp/agent-kit-runs"),
-        storage_root: Path = Path("./persistent"),
-        workspace_provider: Callable[[RunRequest, str], Path] | None = None,
+        workspace: Path | Callable[[RunRequest, str], Path] | None = None,
     ) -> None: ...
 ```
 
-`workspace_provider`(Stage 4 后修订 2026-05-24):**None**(默认)= ephemeral
-模式,SDK 自建 `workspace_root / <run_id>` + finally rmtree。**callable** =
-provided 模式,使用方完全掌控 workspace 路径与生命周期(provider 负责 mkdir,
-SDK 不删);`ctx.workspace_ephemeral` 随之为 False,toolset 可在 workspace 跨
-run 缓存(典型场景:把 baizhi-agent 的 tenant_agent 持久空间映射进 SDK,
-SKILL 内嵌的 script 在 workspace 里跑产物留下,见 § 16)。
+`workspace`(修订 2026-05-27,合并 `workspace_root` + `workspace_provider`):
+
+| `workspace=` | 行为 | `ctx.workspace_ephemeral` |
+|---|---|---|
+| `None` (默认) | `Path("/tmp/agent-kit-runs") / <run_id>`;SDK mkdir + finally rmtree | `True` |
+| `Path` | `<path> / <run_id>`;SDK mkdir 子目录 + finally rmtree 子目录(父路径保留) | `True` |
+| `Callable[(req, run_id), Path]` | 使用方完全掌控路径与生命周期;SDK 不 mkdir 不 rmtree | `False` |
+
+`storage_root` 参数已删除(2026-05-27):见 § 5.2 注释,`ctx.storage` 同期下线。
 
 > **修订 2026-05-24**:
 > - 删除 `mcp_servers: list[McpServerConfig]` 参数(原来是糖)
@@ -1304,10 +1308,11 @@ Runner **不**新增 `skill_registry` 参数(保持 § 9.1 "不为你 new toolse
 > discovery 把 SkillCatalogToolset 当成 prelude 数据源,语义清晰:**toolsets
 > 列表既是工具源也是 prelude 元数据源**,单一真相。
 
-### 10.2 Runner 与 ctx.workspace / ctx.storage / ctx.emit
+### 10.2 Runner 与 ctx.workspace / ctx.emit
 
-- `workspace = workspace_root / run_id`:Runner.run 开始 mkdir,finally 删
-- `storage = storage_root`:不分 run,toolsets 自决子结构
+- `workspace`:见 § 9.1 表;ephemeral 模式 Runner mkdir + finally rmtree,
+  callable 模式使用方掌控
+- `ctx.storage` **已删除**(修订 2026-05-27,YAGNI:无 toolset 用过)
 - `ctx.emit`:Stage 3 暂为 no-op(`lambda evt: None`)。toolsets 调它的进度事件
   会被丢弃。**Stage 3.5 / Stage 4 候选**:用 asyncio.Queue 把 emit 路由进 Runner
   yield 的事件流。当前 SDK 内置 toolset(SkillCatalogToolset)不调 emit,
@@ -1681,17 +1686,14 @@ class Agent:
     # advanced:Runner 的其他 ctor 参数都暴露,默认值跟 Runner 一致
     hooks: list[Hook] = field(default_factory=list)
     compactor: ContextCompactor | None = None
-    workspace_provider: Callable[[RunRequest, str], Path] | None = None
-    workspace_root: Path = Path("/tmp/agent-kit-runs")
-    storage_root: Path = Path("./persistent")
+    workspace: Path | Callable[[RunRequest, str], Path] | None = None
 
     # 默认的 per-run 参数(用 .run() 时不传就用这个,传了就 override)
     default_max_rounds: int = 10
     default_temperature: float = 0.7
 
     # **故意没有 `default_tenant_id`**:tenant 是上层多租户应用的概念,不是
-    # agent 自身的固定属性。`run()` 方法签名里给 "default" 当 keyword 默认,
-    # 多租户使用方每次传
+    # agent 自身的固定属性
 
     def __post_init__(self) -> None:
         if isinstance(self.model, str):
@@ -1701,8 +1703,7 @@ class Agent:
             provider=self.model, toolsets=self.tools,
             system_prelude=self.instruction,
             compactor=self.compactor, hooks=self.hooks,
-            workspace_root=self.workspace_root, storage_root=self.storage_root,
-            workspace_provider=self.workspace_provider,
+            workspace=self.workspace,
             default_max_rounds=self.default_max_rounds,
         )
 

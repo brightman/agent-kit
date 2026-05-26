@@ -82,7 +82,7 @@ def test_setup_runs_lazily_on_first_execute(tmp_path) -> None:
     )
     agent = Agent(
         name="t", model=provider, tools=[ts],
-        workspace_root=tmp_path / "ws",
+        workspace=tmp_path / "ws",
     )
     assert runner.workspace is None        # before run
     agent.run_sync("go")
@@ -327,7 +327,7 @@ def test_runner_aclose_called_after_run(tmp_path) -> None:
     agent = Agent(
         name="t", model=_Final(),
         tools=[SandboxToolset(_Trackable())],
-        workspace_root=tmp_path / "ws",
+        workspace=tmp_path / "ws",
     )
     agent.run_sync("noop")
     assert closed["n"] == 1

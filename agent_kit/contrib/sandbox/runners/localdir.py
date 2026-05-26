@@ -112,7 +112,7 @@ class LocalDirRunner:
         full.write_bytes(content)
 
     async def aclose(self) -> None:
-        # workspace lifecycle is Runner.workspace_provider's concern, not ours
+        # workspace lifecycle is the Runner(workspace=...) concern, not ours
         pass
 
     # ---- internal ----

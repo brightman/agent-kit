@@ -37,15 +37,16 @@ class ToolCallContext:
     `workspace_ephemeral`:Runner 是否会在 run 结束后 rmtree workspace。
     - True(默认)= Runner 自建 + 自删,toolset **不应**在 workspace 里
       跨 run 缓存(数据下次 run 没了)
-    - False = 使用方通过 `Runner.workspace_provider` 注入持久目录,
+    - False = 使用方通过 `Agent(workspace=callable)` 注入持久目录,
       Runner 不动它,toolset 可以放心物化 + 缓存(例如 skill files)
+
+    Want per-tool free-form metadata(skill name being invoked, etc.)?
+    Stash it in `run_state` — that's the dict slot for that.
     """
 
     run_id: str
-    skill_name: str | None
     cancel: asyncio.Event
     workspace: Path
-    storage: Path
     emit: Callable[[Event], None]
     workspace_ephemeral: bool = True
     run_state: dict[str, Any] = field(default_factory=dict)

@@ -72,10 +72,8 @@ def _null_ctx() -> ToolCallContext:
     We pass a minimal placeholder per call to satisfy the type."""
     return ToolCallContext(
         run_id="mcp-sandbox-internal",
-        skill_name=None,
         cancel=asyncio.Event(),
         workspace=Path("/tmp"),
-        storage=Path("/tmp"),
         emit=lambda evt: None,
     )
 

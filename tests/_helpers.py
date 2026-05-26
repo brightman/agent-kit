@@ -167,10 +167,8 @@ def make_ctx(**overrides: Any) -> ToolCallContext:
     """ToolCallContext with sane defaults;tests 一般不关心 ctx 细节。"""
     base: dict[str, Any] = dict(
         run_id="r1",
-        skill_name=None,
         cancel=asyncio.Event(),
         workspace=Path("/tmp"),
-        storage=Path("/tmp"),
         emit=lambda evt: None,
     )
     base.update(overrides)

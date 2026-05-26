@@ -11,8 +11,9 @@
 - **skill catalog 来自 discovery**:Runner 不收 `skill_registry` 参数;
   在 toolsets 列表里 isinstance 找 `SkillCatalogToolset`,从中读 registry
   去构造 prelude 段(§ 10.1)
-- **workspace 生命周期**:run_id 启动时分配,
-  workspace = workspace_root / run_id;mkdir 在 run 开头,finally 删
+- **workspace 生命周期**:run_id 启动时分配,workspace 路径见
+  `Runner(workspace=...)` 文档;ephemeral 模式下 mkdir 在 run 开头,
+  finally 删
 - **错误传播双轨**:`run` yield error event 后 return;
   `run_to_completion` 遇 error event raise RuntimeError
 
@@ -142,26 +143,29 @@ class Runner:
         system_prelude: str = "",
         compactor: ContextCompactor | None = None,
         hooks: list[Hook] | None = None,
-        workspace_root: Path = Path("/tmp/agent-kit-runs"),
-        storage_root: Path = Path("./persistent"),
-        workspace_provider: Callable[["RunRequest", str], Path] | None = None,
+        workspace: Path | Callable[["RunRequest", str], Path] | None = None,
     ) -> None:
-        """Args 见 spec § 9.1。
+        """Args 见 spec § 9.1.
 
-        `workspace_provider`:None(默认)= SDK 自建 `workspace_root / <run_id>`
-        + finally rmtree(ephemeral)。传 callable = 使用方完全掌控 workspace
-        路径与生命周期(provider 负责 mkdir,SDK 不删);ctx.workspace_ephemeral
-        随之为 False,toolset 可在 workspace 跨 run 缓存(如 skill files 物化)。
+        `workspace` accepts three shapes:
 
-        典型用法:把使用方的 per-agent / per-tenant 持久空间映射进 SDK
+        - **None** (default): `Path("/tmp/agent-kit-runs") / <run_id>`. SDK
+          mkdirs on run start, rmtrees on exit. Ephemeral.
+        - **Path** (e.g. `Path("/var/lib/myapp")`): `<path> / <run_id>`. SDK
+          mkdirs the run-subdir on run start, rmtrees it on exit. Still
+          ephemeral; the parent path stays.
+        - **Callable** `(req: RunRequest, run_id: str) -> Path`: caller owns
+          mkdir + lifecycle. SDK does NOT mkdir, does NOT rmtree.
+          `ctx.workspace_ephemeral=False` so toolsets can cache across runs.
+
+        Typical persistent-workspace pattern:
 
             def persistent_workspace(req, run_id):
-                # tenant 在 application 层用 closure 或 req.metadata 取
-                p = Path(f"/data/agents/{req.agent_id}/{this_tenant_id}")
+                p = Path(f"/data/agents/{req.agent_id}")
                 p.mkdir(parents=True, exist_ok=True)
                 return p
 
-            Runner(..., workspace_provider=persistent_workspace)
+            Runner(..., workspace=persistent_workspace)
         """
         self._provider = provider
         self._toolsets = list(toolsets)
@@ -169,9 +173,15 @@ class Runner:
         self._prelude = system_prelude
         self._compactor = compactor
         self._hooks = list(hooks or ())
-        self._workspace_root = Path(workspace_root)
-        self._storage_root = Path(storage_root)
-        self._workspace_provider = workspace_provider
+        if workspace is None:
+            self._workspace_root: Path | None = Path("/tmp/agent-kit-runs")
+            self._workspace_provider: Callable[["RunRequest", str], Path] | None = None
+        elif callable(workspace):
+            self._workspace_root = None
+            self._workspace_provider = workspace
+        else:
+            self._workspace_root = Path(workspace)
+            self._workspace_provider = None
 
     # ---- public ----
 
@@ -209,11 +219,9 @@ class Runner:
                 )
                 ctx = ToolCallContext(
                     run_id=run_id,
-                    skill_name=None,
                     cancel=asyncio.Event(),
                     workspace=workspace,
-                    storage=self._storage_root,
-                    emit=lambda evt: None,  # Stage 3: no-op(§ 10.2)
+                    emit=lambda evt: None,  # no-op until tool progress events land (spec § 10.2)
                     workspace_ephemeral=ephemeral,
                 )
             except Exception as exc:  # noqa: BLE001

@@ -52,7 +52,7 @@ class _BlowupToolset(BaseToolset):
 async def test_run_yields_loop_events(tmp_path: Path) -> None:
     """Runner.run() is the **streaming** API — caller iterates events live."""
     provider = ScriptedProvider([text_response("hi")])
-    runner = Runner(provider, toolsets=[], workspace_root=tmp_path / "ws")
+    runner = Runner(provider, toolsets=[], workspace=tmp_path / "ws")
     events = [evt async for evt in runner.run(make_request())]
     kinds = [e.kind for e in events]
     assert kinds == [
@@ -67,7 +67,7 @@ async def test_run_yields_error_event_does_not_raise(tmp_path: Path) -> None:
     run_to_completion which DOES raise (covered through Agent in test_agent)."""
     runner = Runner(
         RaisingProvider(message="boom"),
-        toolsets=[], workspace_root=tmp_path / "ws",
+        toolsets=[], workspace=tmp_path / "ws",
     )
     events = [evt async for evt in runner.run(make_request())]
     error_evts = [e for e in events if e.kind == "error"]
@@ -80,11 +80,11 @@ async def test_run_yields_error_event_does_not_raise(tmp_path: Path) -> None:
 async def test_run_to_completion_events_match_run(tmp_path: Path) -> None:
     """run_to_completion.events should be the same list run() yields."""
     provider1 = ScriptedProvider([text_response("x")])
-    runner1 = Runner(provider1, toolsets=[], workspace_root=tmp_path / "w1")
+    runner1 = Runner(provider1, toolsets=[], workspace=tmp_path / "w1")
     stream_kinds = [e.kind async for e in runner1.run(make_request())]
 
     provider2 = ScriptedProvider([text_response("x")])
-    runner2 = Runner(provider2, toolsets=[], workspace_root=tmp_path / "w2")
+    runner2 = Runner(provider2, toolsets=[], workspace=tmp_path / "w2")
     result = await runner2.run_to_completion(make_request())
     aggr_kinds = [e.kind for e in result.events]
 
@@ -108,7 +108,7 @@ async def test_workspace_mkdir_and_cleanup_success(tmp_path: Path) -> None:
 
     provider = ScriptedProvider([text_response()])
     runner = Runner(
-        provider, toolsets=[], workspace_root=ws_root, hooks=[_PeekHook()]
+        provider, toolsets=[], workspace=ws_root, hooks=[_PeekHook()]
     )
     await runner.run_to_completion(make_request())
     assert seen, "before_model hook should have fired"
@@ -129,7 +129,7 @@ async def test_workspace_cleanup_on_provider_error(tmp_path: Path) -> None:
 
     runner = Runner(
         RaisingProvider(message="nope"),
-        toolsets=[], workspace_root=tmp_path / "ws", hooks=[_Snoop()],
+        toolsets=[], workspace=tmp_path / "ws", hooks=[_Snoop()],
     )
     events = [evt async for evt in runner.run(make_request())]
     assert any(e.kind == "error" for e in events)
@@ -150,7 +150,7 @@ async def test_ctx_run_id_matches_workspace(tmp_path: Path) -> None:
     provider = ScriptedProvider([text_response()])
     runner = Runner(
         provider, toolsets=[], hooks=[_Probe()],
-        workspace_root=tmp_path / "ws",
+        workspace=tmp_path / "ws",
     )
     await runner.run_to_completion(make_request())
     assert captured["workspace"].name == captured["run_id"]
@@ -171,7 +171,7 @@ async def test_setup_error_yields_setup_stage(tmp_path: Path) -> None:
     runner = Runner(
         provider,
         toolsets=[_BlowupToolset()],
-        workspace_root=tmp_path / "ws",
+        workspace=tmp_path / "ws",
     )
     events = [evt async for evt in runner.run(make_request())]
     error_evts = [e for e in events if e.kind == "error"]
@@ -185,7 +185,7 @@ async def test_toolsets_aclose_called_even_on_error(tmp_path: Path) -> None:
     ts = RecordingToolset("a", {"f": "1"})
     runner = Runner(
         RaisingProvider(message="x"),
-        toolsets=[ts], workspace_root=tmp_path / "ws",
+        toolsets=[ts], workspace=tmp_path / "ws",
     )
     [e async for e in runner.run(make_request())]
     assert ts.closed == 1

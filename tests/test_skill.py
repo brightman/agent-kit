@@ -154,8 +154,8 @@ class _FakeRegistry(SkillRegistry):
 
 def _ctx() -> ToolCallContext:
     return ToolCallContext(
-        run_id="r1", skill_name=None,
-        cancel=asyncio.Event(), workspace=Path("/tmp"), storage=Path("/tmp"),
+        run_id="r1",
+        cancel=asyncio.Event(), workspace=Path("/tmp"),
         emit=lambda evt: None,
     )
 

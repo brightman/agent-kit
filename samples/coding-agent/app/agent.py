@@ -51,8 +51,8 @@ def build_agent(
         Uses in-memory StubRunner. `seed_files` populates the dict workspace.
     backend="localdir":
         Uses LocalDirRunner with a real host subprocess. `seed_files` is
-        materialized via a workspace_provider that writes them to disk in
-        a fresh tmpdir (or `workspace_root` if you pass one explicitly).
+        materialized via a `workspace=` callable that writes them to disk
+        (under `workspace_root` if given, else a fresh tmpdir).
     """
     if backend == "stub":
         seed = seed_files if seed_files is not None else _default_seed()
@@ -67,7 +67,7 @@ def build_agent(
 
     if backend == "localdir":
         seed = seed_files if seed_files is not None else _default_seed()
-        # workspace_provider materializes seed files BEFORE the run, then
+        # `workspace=` callable materializes seed files BEFORE the run, then
         # hands the path to LocalDirRunner.setup().
         return Agent(
             name="coding-agent",
@@ -80,7 +80,7 @@ def build_agent(
                 ],
                 env_passthrough=("PATH", "HOME"),
             ))],
-            workspace_provider=_seed_provider(seed, workspace_root),
+            workspace=_seed_provider(seed, workspace_root),
             default_max_rounds=12,
         )
 
@@ -102,7 +102,7 @@ def _default_seed() -> dict[str, bytes]:
 
 
 def _seed_provider(seed: dict[str, bytes], workspace_root: Path | None):
-    """workspace_provider that materializes seed files into a fresh dir."""
+    """`workspace=` callable that materializes seed files into a fresh dir."""
     import tempfile
 
     def provider(_req, run_id):

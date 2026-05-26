@@ -52,10 +52,8 @@ class _StubToolset(BaseToolset):
 def _ctx() -> ToolCallContext:
     return ToolCallContext(
         run_id="r1",
-        skill_name=None,
         cancel=asyncio.Event(),
         workspace=Path("/tmp"),
-        storage=Path("/tmp"),
         emit=lambda evt: None,
     )
 

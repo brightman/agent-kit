@@ -108,7 +108,7 @@ def test_localdir_end_to_end_bug_fix(tmp_path) -> None:
             command_allowlist=["ls", "python", "python3"],
             env_passthrough=("PATH",),
         ))],
-        workspace_provider=lambda _req, _run_id: tmp_path,
+        workspace=lambda _req, _run_id: tmp_path,
         default_max_rounds=10,
     )
 
@@ -179,7 +179,7 @@ def test_localdir_allowlist_blocks_disallowed_command(tmp_path) -> None:
     agent = Agent(
         name="t", model=_OneBadCmd(),
         tools=[SandboxToolset(LocalDirRunner(command_allowlist=["ls"]))],
-        workspace_provider=lambda req, run_id: tmp_path,
+        workspace=lambda req, run_id: tmp_path,
     )
     result = agent.run_sync("do bad")
     assert result.error is None
@@ -213,7 +213,7 @@ def test_localdir_path_traversal_blocked_e2e(tmp_path) -> None:
     agent = Agent(
         name="t", model=_Traversal(),
         tools=[SandboxToolset(LocalDirRunner())],
-        workspace_provider=lambda req, run_id: tmp_path,
+        workspace=lambda req, run_id: tmp_path,
     )
     result = agent.run_sync("read root")
     assert result.error is None
