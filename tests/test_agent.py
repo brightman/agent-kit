@@ -2,78 +2,38 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
 import pytest
 
-from agent_kit import Agent, Message, RunRequest, RunResult, ToolCall
-from agent_kit.provider import LlmResponse, ToolSchema
+from agent_kit import Agent, Hook, Message, RunRequest, RunResult, ToolCall
 from agent_kit.runner import Runner
-from agent_kit.toolset import BaseToolset, ToolCallContext
-from agent_kit.types import ToolResult
+
+from tests._helpers import (
+    RecordingToolset,
+    ScriptedProvider,
+    text_response,
+    tool_call_response,
+)
 
 
-# ---- helpers ----
-
-
-class _StubProvider:
-    """Scriptable LlmProvider. Each `chat()` returns the next queued response."""
-
-    name = "stub"
-
-    def __init__(self, responses: list[LlmResponse] | None = None) -> None:
-        self._responses = list(responses or [
-            LlmResponse(text="default reply", tool_calls=[],
-                        usage={}, raw={}, finish_reason="stop"),
-        ])
-        self.calls: list[dict[str, Any]] = []
-
-    async def chat(self, messages, tools=None, *, temperature=0.7, max_tokens=None):
-        self.calls.append({
-            "messages": list(messages),
-            "tools": list(tools) if tools else None,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-        })
-        if len(self._responses) == 1:
-            return self._responses[0]   # 重复同一 response
-        return self._responses.pop(0)
-
-    async def chat_stream(self, *a, **k):
-        raise NotImplementedError
-
-
-class _NoopToolset(BaseToolset):
-    """Single tool; never called by tests but counts as a registered toolset."""
-
-    name = "noop"
-
-    def build_schemas(self) -> list[ToolSchema]:
-        return [
-            ToolSchema(
-                name="noop_tool",
-                description="does nothing",
-                parameters={"type": "object", "properties": {}},
-            )
-        ]
-
-    async def execute(self, call, ctx):
-        return ToolResult(call_id=call.id, content="ok")
+def _noop_toolset() -> RecordingToolset:
+    """Single tool; never actually invoked by most tests."""
+    return RecordingToolset(name="noop", handlers={"noop_tool": "ok"})
 
 
 # ---- construction ----
 
 
 def test_agent_basic_construction() -> None:
-    a = Agent(name="x", model=_StubProvider())
+    a = Agent(name="x", model=ScriptedProvider())
     assert a.name == "x"
     assert isinstance(a.runner, Runner)
 
 
 def test_agent_holds_long_lived_runner() -> None:
     """Same Runner across multiple .run() calls — toolset state preserved."""
-    a = Agent(name="x", model=_StubProvider())
+    a = Agent(name="x", model=ScriptedProvider())
     r1 = a.runner
     a.run_sync("first")
     a.run_sync("second")
@@ -81,7 +41,7 @@ def test_agent_holds_long_lived_runner() -> None:
 
 
 def test_agent_passes_instruction_as_system_prelude() -> None:
-    provider = _StubProvider()
+    provider = ScriptedProvider()
     a = Agent(name="x", model=provider, instruction="be brief")
     a.run_sync("hi")
     # First call's first message is the system prompt = instruction
@@ -91,9 +51,8 @@ def test_agent_passes_instruction_as_system_prelude() -> None:
 
 
 def test_agent_passes_tools_to_provider() -> None:
-    provider = _StubProvider()
-    ts = _NoopToolset()
-    a = Agent(name="x", model=provider, tools=[ts])
+    provider = ScriptedProvider()
+    a = Agent(name="x", model=provider, tools=[_noop_toolset()])
     a.run_sync("hi")
     tool_names = {t.name for t in (provider.calls[0]["tools"] or [])}
     assert "noop_tool" in tool_names
@@ -103,10 +62,7 @@ def test_agent_passes_tools_to_provider() -> None:
 
 
 def test_run_sync_returns_run_result() -> None:
-    a = Agent(name="x", model=_StubProvider([
-        LlmResponse(text="answer", tool_calls=[],
-                    usage={}, raw={}, finish_reason="stop"),
-    ]))
+    a = Agent(name="x", model=ScriptedProvider([text_response("answer")]))
     result = a.run_sync("question")
     assert isinstance(result, RunResult)
     assert result.final_text == "answer"
@@ -114,10 +70,7 @@ def test_run_sync_returns_run_result() -> None:
 
 @pytest.mark.asyncio
 async def test_run_async_returns_run_result() -> None:
-    a = Agent(name="x", model=_StubProvider([
-        LlmResponse(text="async-answer", tool_calls=[],
-                    usage={}, raw={}, finish_reason="stop"),
-    ]))
+    a = Agent(name="x", model=ScriptedProvider([text_response("async-answer")]))
     result = await a.run("question")
     assert result.final_text == "async-answer"
 
@@ -125,7 +78,7 @@ async def test_run_async_returns_run_result() -> None:
 @pytest.mark.asyncio
 async def test_run_sync_rejected_in_running_loop() -> None:
     """Inherits Runner.run_sync's loop detection."""
-    a = Agent(name="x", model=_StubProvider())
+    a = Agent(name="x", model=ScriptedProvider())
     with pytest.raises(RuntimeError, match="cannot be called from a running event loop"):
         a.run_sync("hi")
 
@@ -134,7 +87,7 @@ async def test_run_sync_rejected_in_running_loop() -> None:
 
 
 def test_run_uses_default_max_rounds_temperature_max_tokens() -> None:
-    provider = _StubProvider()
+    provider = ScriptedProvider()
     a = Agent(
         name="x", model=provider,
         default_max_rounds=7,
@@ -148,7 +101,7 @@ def test_run_uses_default_max_rounds_temperature_max_tokens() -> None:
 
 
 def test_run_overrides_per_call() -> None:
-    provider = _StubProvider()
+    provider = ScriptedProvider()
     a = Agent(name="x", model=provider, default_temperature=0.7, default_max_tokens=1000)
     a.run_sync("hi", temperature=0.0, max_tokens=42)
     assert provider.calls[0]["temperature"] == 0.0
@@ -156,31 +109,21 @@ def test_run_overrides_per_call() -> None:
 
 
 def test_agent_id_in_request_matches_agent_name() -> None:
-    provider = _StubProvider()
-    seen: dict[str, Any] = {}
-
-    from agent_kit import Hook
+    """Smoke check that Agent.run wires agent_id from name; real assertion
+    in test_run_request_builder below."""
 
     class _Cap(Hook):
         async def before_model(self, ctx, messages, tools):
-            # ToolCallContext doesn't carry agent_id directly; we check via
-            # workspace path which includes the run_id (not agent_id). Better
-            # check is via the request the Runner saw — easiest:
-            # we can capture by reading ctx.run_id and trust Agent.run wires
-            # agent_id via _build_request. Smoke check below verifies.
             return None
 
-    a = Agent(name="my-agent", model=provider, hooks=[_Cap()])
+    a = Agent(name="my-agent", model=ScriptedProvider(), hooks=[_Cap()])
     result = a.run_sync("hi")
-    # agent_id propagates into events through metadata; we don't have that
-    # surface today, so this is a weak smoke test — the real assertion is
-    # in test_run_request_builder below.
     assert result.error is None
 
 
 def test_run_request_builder_carries_all_fields() -> None:
     """Verify _build_request packs agent_id + every override."""
-    a = Agent(name="my-agent", model=_StubProvider(),
+    a = Agent(name="my-agent", model=ScriptedProvider(),
               default_max_rounds=8, default_temperature=0.5, default_max_tokens=100)
     req = a._build_request(
         "the question",
@@ -203,7 +146,7 @@ def test_run_request_builder_carries_all_fields() -> None:
 
 
 def test_prior_messages_passed_to_loop() -> None:
-    provider = _StubProvider()
+    provider = ScriptedProvider()
     a = Agent(name="x", model=provider)
     a.run_sync(
         "follow-up",
@@ -262,11 +205,11 @@ def test_agent_string_model_constructs_litellm_if_available() -> None:
 
 def test_runner_property_exposes_full_api() -> None:
     """Advanced users can drop down to Runner for `run_to_completion(RunRequest(...))`."""
-    a = Agent(name="x", model=_StubProvider())
+    a = Agent(name="x", model=ScriptedProvider())
     result = a.runner.run_sync(
         RunRequest(agent_id="x", user_message="hi"),
     )
-    assert result.final_text == "default reply"
+    assert result.final_text == "ok"   # default from helpers' _default_response
 
 
 # ---- workspace_provider passthrough ----
@@ -277,8 +220,6 @@ def test_workspace_provider_passthrough(tmp_path) -> None:
     external = tmp_path / "shared"
     external.mkdir()
 
-    from agent_kit import Hook
-
     class _Cap(Hook):
         async def before_model(self, ctx, messages, tools):
             seen["workspace"] = ctx.workspace
@@ -286,7 +227,7 @@ def test_workspace_provider_passthrough(tmp_path) -> None:
             return None
 
     a = Agent(
-        name="x", model=_StubProvider(),
+        name="x", model=ScriptedProvider(),
         workspace_provider=lambda req, run_id: external,
         hooks=[_Cap()],
     )
@@ -302,14 +243,11 @@ def test_workspace_provider_passthrough(tmp_path) -> None:
 
 def test_cancel_check_passed_through() -> None:
     """Caller-provided cancel_check is honored."""
-    provider = _StubProvider([
-        LlmResponse(text="round1", tool_calls=[
-            ToolCall(id="c1", name="noop_tool", arguments={}),
-        ], usage={}, raw={}, finish_reason="tool_calls"),
-        LlmResponse(text="never reached", tool_calls=[],
-                    usage={}, raw={}, finish_reason="stop"),
+    provider = ScriptedProvider([
+        tool_call_response(ToolCall(id="c1", name="noop_tool", arguments={})),
+        text_response("never reached"),
     ])
-    a = Agent(name="x", model=provider, tools=[_NoopToolset()])
+    a = Agent(name="x", model=provider, tools=[_noop_toolset()])
     # cancel after the first LLM round
     state = {"checks": 0}
 

@@ -13,40 +13,22 @@ Coverage:
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 import pytest
 
 from agent_kit import (
-    DEFAULT_SKILLS_GUIDANCE,
     Agent,
     InMemorySkillRegistry,
-    Message,
     Skill,
     SkillFrontmatter,
-    SkillRegistry,
+    ToolCall,
 )
 from agent_kit.contrib.skills import FilesystemSkillRegistry
-from agent_kit.provider import LlmResponse
+
+from tests._helpers import ScriptedProvider, text_response, tool_call_response
 
 
 # ---- helpers ----
-
-
-class _StubProvider:
-    name = "stub"
-
-    def __init__(self) -> None:
-        self.calls: list[dict[str, Any]] = []
-
-    async def chat(self, messages, tools=None, *, temperature=0.7, max_tokens=None):
-        self.calls.append({"messages": list(messages), "tools": list(tools) if tools else None})
-        return LlmResponse(
-            text="ok", tool_calls=[], usage={}, raw={}, finish_reason="stop",
-        )
-
-    async def chat_stream(self, *a, **k):
-        raise NotImplementedError
 
 
 def _make_skill(name: str, desc: str = "d", version: str = "1.0") -> Skill:
@@ -57,13 +39,13 @@ def _make_skill(name: str, desc: str = "d", version: str = "1.0") -> Skill:
     )
 
 
-def _system_content(provider: _StubProvider) -> str:
+def _system_content(provider: ScriptedProvider) -> str:
     """First system message from the first chat call(empty string 若无)。"""
     msgs = provider.calls[0]["messages"]
     return next((m.content for m in msgs if m.role == "system"), "")
 
 
-def _has_skill_catalog_tools(provider: _StubProvider) -> bool:
+def _has_skill_catalog_tools(provider: ScriptedProvider) -> bool:
     tools = provider.calls[0]["tools"] or []
     names = {t.name for t in tools}
     return {"list_skills", "load_skill", "load_skill_resource"} <= names
@@ -73,13 +55,11 @@ def _has_skill_catalog_tools(provider: _StubProvider) -> bool:
 
 
 def test_skills_none_no_catalog() -> None:
-    provider = _StubProvider()
+    provider = ScriptedProvider()
     a = Agent(name="x", model=provider)
     a.run_sync("hi")
     assert provider.calls[0]["tools"] is None  # no tools advertised
-    # no skill section in prelude
-    sys = next((m.content for m in provider.calls[0]["messages"] if m.role == "system"), "")
-    assert "Available Skills" not in sys
+    assert "Available Skills" not in _system_content(provider)
 
 
 def test_skills_path_builds_filesystem_registry(tmp_path: Path) -> None:
@@ -89,7 +69,7 @@ def test_skills_path_builds_filesystem_registry(tmp_path: Path) -> None:
     (skill_dir / "SKILL.md").write_text(
         "---\nname: alpha\ndescription: alpha skill\nversion: 1\n---\n# body\n"
     )
-    provider = _StubProvider()
+    provider = ScriptedProvider()
     a = Agent(name="x", model=provider, skills=tmp_path)
     a.run_sync("hi")
     assert _has_skill_catalog_tools(provider)
@@ -105,21 +85,21 @@ def test_skills_str_also_works(tmp_path: Path) -> None:
     (skill_dir / "SKILL.md").write_text(
         "---\nname: beta\ndescription: x\nversion: 1\n---\nbody\n"
     )
-    a = Agent(name="x", model=_StubProvider(), skills=str(tmp_path))
+    a = Agent(name="x", model=ScriptedProvider(), skills=str(tmp_path))
     assert isinstance(a._skills_registry, FilesystemSkillRegistry)
 
 
 def test_skills_registry_instance_passthrough() -> None:
     """Passing a SkillRegistry instance → used directly."""
     reg = InMemorySkillRegistry([_make_skill("gamma")])
-    a = Agent(name="x", model=_StubProvider(), skills=reg)
+    a = Agent(name="x", model=ScriptedProvider(), skills=reg)
     assert a._skills_registry is reg
 
 
 def test_skills_list_wraps_inmemory() -> None:
     """list[Skill] → InMemorySkillRegistry."""
     a = Agent(
-        name="x", model=_StubProvider(),
+        name="x", model=ScriptedProvider(),
         skills=[_make_skill("a"), _make_skill("b")],
     )
     assert isinstance(a._skills_registry, InMemorySkillRegistry)
@@ -127,12 +107,12 @@ def test_skills_list_wraps_inmemory() -> None:
 
 def test_skills_list_non_skill_raises() -> None:
     with pytest.raises(TypeError, match="list of Skill objects"):
-        Agent(name="x", model=_StubProvider(), skills=["not a skill"])  # type: ignore[list-item]
+        Agent(name="x", model=ScriptedProvider(), skills=["not a skill"])  # type: ignore[list-item]
 
 
 def test_skills_unsupported_type_raises() -> None:
     with pytest.raises(TypeError, match="Agent.skills expects"):
-        Agent(name="x", model=_StubProvider(), skills=42)  # type: ignore[arg-type]
+        Agent(name="x", model=ScriptedProvider(), skills=42)  # type: ignore[arg-type]
 
 
 # ---- auto-enable all skills (the openai-agents default) ----
@@ -140,7 +120,7 @@ def test_skills_unsupported_type_raises() -> None:
 
 def test_run_without_enabled_skills_lists_all() -> None:
     """spec § 17.6: enabled_skills=None → fetch all from registry."""
-    provider = _StubProvider()
+    provider = ScriptedProvider()
     a = Agent(
         name="x", model=provider,
         skills=[_make_skill("alpha"), _make_skill("beta"), _make_skill("gamma")],
@@ -154,7 +134,7 @@ def test_run_without_enabled_skills_lists_all() -> None:
 
 def test_run_with_explicit_enabled_skills_subset() -> None:
     """Explicit list wins — only those go in prelude."""
-    provider = _StubProvider()
+    provider = ScriptedProvider()
     a = Agent(
         name="x", model=provider,
         skills=[_make_skill("a"), _make_skill("b"), _make_skill("c")],
@@ -168,7 +148,7 @@ def test_run_with_explicit_enabled_skills_subset() -> None:
 
 def test_run_with_explicit_empty_list_no_skills_in_prelude() -> None:
     """Explicit [] → no skills section."""
-    provider = _StubProvider()
+    provider = ScriptedProvider()
     a = Agent(
         name="x", model=provider,
         skills=[_make_skill("a")],
@@ -182,11 +162,10 @@ def test_run_with_explicit_empty_list_no_skills_in_prelude() -> None:
 
 def test_run_without_skills_source_explicit_enabled_is_noop() -> None:
     """No skills configured + caller passes enabled_skills → still no section."""
-    provider = _StubProvider()
+    provider = ScriptedProvider()
     a = Agent(name="x", model=provider)  # no skills
     a.run_sync("hi", enabled_skills=["nonexistent"])
-    sys = next((m.content for m in provider.calls[0]["messages"] if m.role == "system"), "")
-    assert "Available Skills" not in sys
+    assert "Available Skills" not in _system_content(provider)
 
 
 # ---- DEFAULT_SKILLS_GUIDANCE prelude injection ----
@@ -194,7 +173,7 @@ def test_run_without_skills_source_explicit_enabled_is_noop() -> None:
 
 def test_default_guidance_appears_in_prelude_by_default() -> None:
     """spec § 10 修订:`SkillCatalogToolset(instructions=None)` → 默认 guidance 注入 prelude."""
-    provider = _StubProvider()
+    provider = ScriptedProvider()
     a = Agent(name="x", model=provider, skills=[_make_skill("a")])
     a.run_sync("hi")
     sys = _system_content(provider)
@@ -203,7 +182,7 @@ def test_default_guidance_appears_in_prelude_by_default() -> None:
 
 
 def test_custom_guidance_overrides_default() -> None:
-    provider = _StubProvider()
+    provider = ScriptedProvider()
     a = Agent(
         name="x", model=provider,
         skills=[_make_skill("a")],
@@ -217,7 +196,7 @@ def test_custom_guidance_overrides_default() -> None:
 
 def test_empty_guidance_string_disables() -> None:
     """Explicit "" → no guidance block at all."""
-    provider = _StubProvider()
+    provider = ScriptedProvider()
     a = Agent(
         name="x", model=provider,
         skills=[_make_skill("a")],
@@ -232,7 +211,7 @@ def test_empty_guidance_string_disables() -> None:
 
 def test_guidance_not_added_when_no_skills_listed() -> None:
     """No skills in prelude (enabled=[]) → no guidance either."""
-    provider = _StubProvider()
+    provider = ScriptedProvider()
     a = Agent(name="x", model=provider, skills=[_make_skill("a")])
     a.run_sync("hi", enabled_skills=[])
     sys = _system_content(provider)
@@ -299,44 +278,16 @@ async def test_inmem_registry_publish_raises() -> None:
 def test_load_skill_tool_returns_body() -> None:
     """LLM calls `load_skill` → returns skill body via SkillCatalogToolset."""
     skill = _make_skill("alpha", desc="alpha skill")
-    provider = _ToolCallingProvider(skill_to_load="alpha")
+    # Round 1: model asks to load alpha; Round 2: model emits final text.
+    provider = ScriptedProvider([
+        tool_call_response(ToolCall(id="c1", name="load_skill",
+                                     arguments={"name": "alpha"})),
+        text_response("got it"),
+    ])
     a = Agent(name="x", model=provider, skills=[skill])
     result = a.run_sync("please use alpha")
-    # The scripted provider does: round 1 → load_skill(alpha), round 2 → final
-    # If alpha body reached the model, it returns "got it"
     assert result.final_text == "got it"
-    # Verify the tool result contained the body
     tool_calls = [e for e in result.events if e.kind == "tool_call"]
     tool_results = [e for e in result.events if e.kind == "tool_result"]
     assert tool_calls[0].payload["name"] == "load_skill"
     assert "# alpha body" in tool_results[0].payload["content"]
-
-
-class _ToolCallingProvider:
-    """Scripted: round 1 calls load_skill, round 2 returns final."""
-
-    name = "tool-caller"
-
-    def __init__(self, skill_to_load: str) -> None:
-        self._target = skill_to_load
-        self._round = 0
-
-    async def chat(self, messages, tools=None, *, temperature=0.7, max_tokens=None):
-        from agent_kit import ToolCall
-
-        self._round += 1
-        if self._round == 1:
-            return LlmResponse(
-                text="", tool_calls=[
-                    ToolCall(id="c1", name="load_skill",
-                              arguments={"name": self._target}),
-                ],
-                usage={}, raw={}, finish_reason="tool_calls",
-            )
-        return LlmResponse(
-            text="got it", tool_calls=[],
-            usage={}, raw={}, finish_reason="stop",
-        )
-
-    async def chat_stream(self, *a, **k):
-        raise NotImplementedError

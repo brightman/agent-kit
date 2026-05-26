@@ -15,15 +15,14 @@ Coverage:
 
 from __future__ import annotations
 
-import asyncio
-from pathlib import Path
-
 import pytest
 
 from agent_kit.loop import AgentLoop, RunRequest
-from agent_kit.provider import LlmResponse, ToolSchema
-from agent_kit.toolset import BaseToolset, ToolCallContext, ToolsetRouter
-from agent_kit.types import Event, Message, ToolCall, ToolResult
+from agent_kit.provider import ToolSchema
+from agent_kit.toolset import BaseToolset, ToolsetRouter
+from agent_kit.types import ToolResult
+
+from tests._helpers import ScriptedProvider, make_ctx, make_request, text_response
 
 
 # ---- helpers ----
@@ -96,29 +95,12 @@ class _TenantAclMcpStyleToolset(BaseToolset):
         return ToolResult(call_id=call.id, content=f"called {call.name}")
 
 
-def _ctx() -> ToolCallContext:
-    return ToolCallContext(
-        run_id="r",
-        skill_name=None,
-        cancel=asyncio.Event(),
-        workspace=Path("/tmp"),
-        storage=Path("/tmp"),
-        emit=lambda evt: None,
-    )
-
-
-def _req(**overrides) -> RunRequest:
-    base = dict(agent_id="a", user_message="x", max_rounds=2)
-    base.update(overrides)
-    return RunRequest(**base)
-
-
 # ---- BaseToolset default ----
 
 
 def test_default_build_schemas_for_request_delegates_to_static() -> None:
     ts = _StaticToolset("s", ["a", "b"])
-    req = _req()
+    req = make_request(max_rounds=2)
     static = [s.name for s in ts.build_schemas()]
     dynamic = [s.name for s in ts.build_schemas_for_request(req)]
     assert static == dynamic == ["a", "b"]
@@ -137,7 +119,7 @@ def test_router_no_request_uses_static_path() -> None:
 def test_router_with_request_uses_per_request_path() -> None:
     """Router(toolsets, request=...) → uses build_schemas_for_request of each."""
     d = _DynamicSkillToolset()
-    req = _req(enabled_skills=["alpha", "beta"])
+    req = make_request(enabled_skills=["alpha", "beta"], max_rounds=2)
     r = ToolsetRouter([d], request=req)
     names = {s.name for s in r.all_schemas()}
     assert names == {"skill_write__alpha", "skill_write__beta"}
@@ -146,7 +128,7 @@ def test_router_with_request_uses_per_request_path() -> None:
 def test_router_static_toolset_unchanged_with_request() -> None:
     """Static toolset (no override) still works when request is passed."""
     s = _StaticToolset("s", ["a"])
-    r = ToolsetRouter([s], request=_req())
+    r = ToolsetRouter([s], request=make_request(max_rounds=2))
     assert [x.name for x in r.all_schemas()] == ["a"]
 
 
@@ -154,7 +136,7 @@ def test_router_mixed_static_and_dynamic() -> None:
     """Static + dynamic in same registry — both respected."""
     s = _StaticToolset("s", ["static_tool"])
     d = _DynamicSkillToolset()
-    req = _req(enabled_skills=["pptx"])
+    req = make_request(enabled_skills=["pptx"], max_rounds=2)
     r = ToolsetRouter([s, d], request=req)
     names = {x.name for x in r.all_schemas()}
     assert names == {"static_tool", "skill_write__pptx"}
@@ -178,46 +160,27 @@ def test_router_collision_detection_per_request() -> None:
     ToolsetRouter([static, dyn])
     # With request: dynamic now emits "x" → collision
     with pytest.raises(ValueError, match="tool name collision: 'x'"):
-        ToolsetRouter([static, dyn], request=_req())
+        ToolsetRouter([static, dyn], request=make_request(max_rounds=2))
 
 
 # ---- AgentLoop per-run rebuild ----
 
 
-class _Scripted:
-    """Provider that records what tools were offered each call."""
-
-    name = "scripted"
-
-    def __init__(self, responses: list[LlmResponse]) -> None:
-        self._responses = list(responses)
-        self.tool_lists: list[list[str]] = []
-
-    async def chat(self, messages, tools=None, *, temperature=0.7, max_tokens=None):
-        self.tool_lists.append([t.name for t in (tools or [])])
-        return self._responses.pop(0)
-
-    async def chat_stream(self, *a, **k):
-        raise NotImplementedError
-
-
 @pytest.mark.asyncio
 async def test_agentloop_rebuilds_router_each_run_with_different_schemas() -> None:
     """Same AgentLoop instance, two runs with different enabled_skills → different tools."""
-    provider = _Scripted([
-        LlmResponse(text="ok", tool_calls=[]),
-        LlmResponse(text="ok", tool_calls=[]),
-    ])
+    provider = ScriptedProvider([text_response(), text_response()])
     dyn = _DynamicSkillToolset()
     loop = AgentLoop(provider, toolsets=[dyn])
 
     # Run 1: enable two skills
-    [e async for e in loop.run(_req(enabled_skills=["a", "b"]), _ctx())]
+    [e async for e in loop.run(make_request(enabled_skills=["a", "b"], max_rounds=2), make_ctx())]
     # Run 2: enable a different set
-    [e async for e in loop.run(_req(enabled_skills=["c"]), _ctx())]
+    [e async for e in loop.run(make_request(enabled_skills=["c"], max_rounds=2), make_ctx())]
 
-    assert provider.tool_lists[0] == ["skill_write__a", "skill_write__b"]
-    assert provider.tool_lists[1] == ["skill_write__c"]
+    tool_lists = [[t.name for t in (c["tools"] or [])] for c in provider.calls]
+    assert tool_lists[0] == ["skill_write__a", "skill_write__b"]
+    assert tool_lists[1] == ["skill_write__c"]
 
 
 @pytest.mark.asyncio
@@ -235,11 +198,11 @@ async def test_agentloop_per_run_collision_yields_setup_error_event() -> None:
         async def execute(self, call, ctx):
             return ToolResult(call_id=call.id, content="")
 
-    provider = _Scripted([LlmResponse(text="never", tool_calls=[])])
+    provider = ScriptedProvider([text_response("never")])
     static = _StaticToolset("s", ["echo"])
     loop = AgentLoop(provider, toolsets=[static, _ConflictDynamic()])
 
-    events = [e async for e in loop.run(_req(), _ctx())]
+    events = [e async for e in loop.run(make_request(max_rounds=2), make_ctx())]
     error_evts = [e for e in events if e.kind == "error"]
     assert len(error_evts) == 1
     assert error_evts[0].payload["stage"] == "setup"
@@ -266,7 +229,7 @@ async def test_agentloop_aclose_walks_toolsets_directly() -> None:
     a = _CloseRecorder("a")
     b = _CloseRecorder("b")
     c = _CloseRecorder("c")
-    loop = AgentLoop(_Scripted([]), toolsets=[a, b, c])
+    loop = AgentLoop(ScriptedProvider(), toolsets=[a, b, c])
     await loop.aclose()
     assert order == ["c", "b", "a"]
     assert a.closed == b.closed == c.closed == 1
@@ -277,10 +240,7 @@ async def test_agentloop_aclose_walks_toolsets_directly() -> None:
 
 @pytest.mark.asyncio
 async def test_tenant_acl_filters_mcp_style_tools() -> None:
-    provider = _Scripted([
-        LlmResponse(text="ok", tool_calls=[]),
-        LlmResponse(text="ok", tool_calls=[]),
-    ])
+    provider = ScriptedProvider([text_response(), text_response()])
     acl_ts = _TenantAclMcpStyleToolset(
         "mcp_acl",
         all_tools=["search", "fetch", "summarize"],
@@ -292,8 +252,9 @@ async def test_tenant_acl_filters_mcp_style_tools() -> None:
     )
     loop = AgentLoop(provider, toolsets=[acl_ts])
 
-    [e async for e in loop.run(_req(metadata={"tenant": "alice"}), _ctx())]
-    [e async for e in loop.run(_req(metadata={"tenant": "bob"}), _ctx())]
+    [e async for e in loop.run(make_request(metadata={"tenant": "alice"}, max_rounds=2), make_ctx())]
+    [e async for e in loop.run(make_request(metadata={"tenant": "bob"}, max_rounds=2), make_ctx())]
 
-    assert provider.tool_lists[0] == ["search"]
-    assert set(provider.tool_lists[1]) == {"search", "fetch"}
+    tool_lists = [[t.name for t in (c["tools"] or [])] for c in provider.calls]
+    assert tool_lists[0] == ["search"]
+    assert set(tool_lists[1]) == {"search", "fetch"}

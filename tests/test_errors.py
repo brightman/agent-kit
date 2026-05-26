@@ -50,13 +50,10 @@ def test_wrap_error_event_plain_exception_unchanged() -> None:
 @pytest.mark.asyncio
 async def test_run_to_completion_raises_leaf_message_for_group() -> None:
     """End-to-end: TaskGroup-wrapped MCP failure surfaces leaf cause to caller."""
-    import asyncio
-    from contextlib import AsyncExitStack
-
-    from agent_kit.loop import RunRequest
     from agent_kit.mcp import McpServerConfig, McpToolset
-    from agent_kit.provider import LlmResponse
     from agent_kit.runner import Runner
+
+    from tests._helpers import ScriptedProvider, make_request, text_response
 
     # Custom toolset whose connect() raises an ExceptionGroup wrapping a
     # ConnectionRefusedError — mimics what anyio TaskGroup does to MCP failures.
@@ -67,18 +64,9 @@ async def test_run_to_completion_raises_leaf_message_for_group() -> None:
                 [ConnectionRefusedError("[Errno 49] Can't assign requested address")],
             )
 
-    class _Dummy:
-        name = "d"
-        async def chat(self, *a, **k):
-            return LlmResponse(text="x", tool_calls=[])
-        async def chat_stream(self, *a, **k):
-            raise NotImplementedError
-
     flaky = _FlakyMcpToolset(
         McpServerConfig(name="x", transport="stdio", command=["unused"])
     )
-    runner = Runner(_Dummy(), toolsets=[flaky])
+    runner = Runner(ScriptedProvider([text_response("x")]), toolsets=[flaky])
     with pytest.raises(RuntimeError, match=r"ConnectionRefusedError.*EADDRNOTAVAIL|\[Errno 49\]"):
-        await runner.run_to_completion(
-            RunRequest(agent_id="a", user_message="hi")
-        )
+        await runner.run_to_completion(make_request())

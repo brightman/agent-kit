@@ -22,13 +22,11 @@ Coverage(对照 docs/tech-design.md § 7 全部):
 from __future__ import annotations
 
 from contextlib import AsyncExitStack
-from typing import Any
 
 import pytest
 from mcp.server.fastmcp import FastMCP
 from mcp.shared.memory import create_client_server_memory_streams
 
-from agent_kit.loop import RunRequest
 from agent_kit.mcp import (
     McpServerConfig,
     McpToolset,
@@ -38,8 +36,10 @@ from agent_kit.mcp import (
 )
 from agent_kit.provider import LlmResponse, ToolSchema
 from agent_kit.runner import Runner
-from agent_kit.toolset import ToolCallContext, ToolsetRouter
+from agent_kit.toolset import ToolsetRouter
 from agent_kit.types import ToolCall
+
+from tests._helpers import ScriptedProvider, make_ctx, make_request, text_response
 
 
 # ---- in-memory FastMCP test server + toolset subclass ----
@@ -243,9 +243,8 @@ async def test_execute_before_connect_returns_error() -> None:
     ts = McpToolset(
         McpServerConfig(name="srv", transport="stdio", command=["x"])
     )
-    ctx = _ctx()
     result = await ts.execute(
-        ToolCall(id="c1", name="mcp__srv__anything", arguments={}), ctx
+        ToolCall(id="c1", name="mcp__srv__anything", arguments={}), make_ctx(),
     )
     assert result.is_error
     assert "not connected" in result.content
@@ -266,7 +265,7 @@ async def test_connect_lists_and_calls_tool() -> None:
 
         result = await ts.execute(
             ToolCall(id="c1", name="mcp__svc__echo", arguments={"text": "hi"}),
-            _ctx(),
+            make_ctx(),
         )
         assert result.is_error is False
         assert "echo:hi" in result.content
@@ -282,7 +281,7 @@ async def test_structured_content_returned_as_json() -> None:
         await ts.connect()
         result = await ts.execute(
             ToolCall(id="c1", name="mcp__svc__add", arguments={"a": 2, "b": 3}),
-            _ctx(),
+            make_ctx(),
         )
         assert result.is_error is False
         assert '"sum": 5' in result.content
@@ -298,7 +297,7 @@ async def test_mcp_iserror_response_becomes_tool_error() -> None:
         await ts.connect()
         result = await ts.execute(
             ToolCall(id="c1", name="mcp__svc__fail", arguments={}),
-            _ctx(),
+            make_ctx(),
         )
         assert result.is_error is True
     finally:
@@ -313,7 +312,7 @@ async def test_execute_unknown_tool_returns_error() -> None:
         await ts.connect()
         result = await ts.execute(
             ToolCall(id="c1", name="mcp__svc__nonexistent", arguments={}),
-            _ctx(),
+            make_ctx(),
         )
         assert result.is_error is True
     finally:
@@ -328,7 +327,7 @@ async def test_execute_wrong_prefix_returns_error() -> None:
         await ts.connect()
         result = await ts.execute(
             ToolCall(id="c1", name="mcp__other__echo", arguments={"text": "x"}),
-            _ctx(),
+            make_ctx(),
         )
         assert result.is_error
         assert "not owned" in result.content
@@ -400,7 +399,7 @@ async def test_lifecycle_per_call() -> None:
         await ts.connect()
         result = await ts.execute(
             ToolCall(id="c", name="mcp__svc__echo", arguments={"text": "hi"}),
-            _ctx(),
+            make_ctx(),
         )
         assert "echo:hi" in result.content
         await ts.aclose()
@@ -412,22 +411,17 @@ async def test_lifecycle_per_run_via_runner() -> None:
     srv = _make_server("svc")
     ts = _InMemMcpToolset(srv, name="svc")
 
-    class _Echoer:
-        name = "echoer"
-        async def chat(self, messages, tools=None, *, temperature=0.7, max_tokens=None):
-            # First and only round: ask to call echo, then resolve
-            assert tools is not None
-            tool_names = {t.name for t in tools}
-            assert "mcp__svc__echo" in tool_names
-            return LlmResponse(text="ok", tool_calls=[])
-        async def chat_stream(self, *a, **k):
-            raise NotImplementedError
+    # Inline provider asserts mcp__svc__echo is advertised then returns final text.
+    seen_tools: list[set[str]] = []
 
-    runner = Runner(_Echoer(), toolsets=[ts])
-    result = await runner.run_to_completion(
-        RunRequest(agent_id="a", user_message="hi", max_rounds=2)
-    )
+    async def chat_fn(messages, tools, round_index):
+        seen_tools.append({t.name for t in (tools or [])})
+        return LlmResponse(text="ok", tool_calls=[], usage={}, raw={}, finish_reason="stop")
+
+    runner = Runner(ScriptedProvider(chat_fn=chat_fn), toolsets=[ts])
+    result = await runner.run_to_completion(make_request(max_rounds=2))
     assert result.error is None
+    assert "mcp__svc__echo" in seen_tools[0]
     # Runner.run finally called loop.aclose → router.aclose → ts.aclose
     assert ts._connected is False
 
@@ -479,21 +473,19 @@ async def test_runner_prewarms_mcp_toolset(tmp_path) -> None:
     srv = _make_server("svc")
     ts = _InMemMcpToolset(srv, name="svc")
 
-    class _Probe:
-        name = "probe"
-        captured_tools: list[ToolSchema] | None = None
-        async def chat(self, messages, tools=None, *, temperature=0.7, max_tokens=None):
-            _Probe.captured_tools = list(tools) if tools else []
-            return LlmResponse(text="ok", tool_calls=[])
-        async def chat_stream(self, *a, **k):
-            raise NotImplementedError
+    captured: list[ToolSchema] = []
 
-    runner = Runner(_Probe(), toolsets=[ts], workspace_root=tmp_path / "ws")
-    result = await runner.run_to_completion(
-        RunRequest(agent_id="a", user_message="hi", max_rounds=2)
+    async def chat_fn(messages, tools, round_index):
+        captured.extend(tools or [])
+        return LlmResponse(text="ok", tool_calls=[], usage={}, raw={}, finish_reason="stop")
+
+    runner = Runner(
+        ScriptedProvider(chat_fn=chat_fn),
+        toolsets=[ts], workspace_root=tmp_path / "ws",
     )
+    result = await runner.run_to_completion(make_request(max_rounds=2))
     assert result.error is None
-    names = {t.name for t in (_Probe.captured_tools or [])}
+    names = {t.name for t in captured}
     assert {"mcp__svc__echo", "mcp__svc__add", "mcp__svc__fail"} <= names
     assert ts._connected is False  # Runner aclose ran
 
@@ -512,18 +504,11 @@ async def test_runner_prewarm_failure_emits_setup_error(tmp_path) -> None:
     flaky = _FlakyToolset(
         McpServerConfig(name="flaky", transport="stdio", command=["x"])
     )
-
-    class _Dummy:
-        name = "d"
-        async def chat(self, *a, **k):
-            return LlmResponse(text="never", tool_calls=[])
-        async def chat_stream(self, *a, **k):
-            raise NotImplementedError
-
-    runner = Runner(_Dummy(), toolsets=[flaky], workspace_root=tmp_path / "ws")
-    events = [e async for e in runner.run(
-        RunRequest(agent_id="a", user_message="hi")
-    )]
+    runner = Runner(
+        ScriptedProvider([text_response("never")]),
+        toolsets=[flaky], workspace_root=tmp_path / "ws",
+    )
+    events = [e async for e in runner.run(make_request())]
     error_evts = [e for e in events if e.kind == "error"]
     assert len(error_evts) == 1
     assert error_evts[0].payload["stage"] == "setup"
@@ -626,8 +611,6 @@ async def test_tool_filter_excludes_from_router_path() -> None:
     filtered to ["echo"], the Router never registered `fail`, so `execute`
     wouldn't get called for it. Verified end-to-end here via Router.
     """
-    from agent_kit.toolset import ToolsetRouter
-
     srv = _make_server("svc")
     ts = _InMemMcpToolset(srv, name="svc", tool_filter=["echo"])
     try:
@@ -638,7 +621,7 @@ async def test_tool_filter_excludes_from_router_path() -> None:
         # Try to execute a filtered-out tool → router returns "unknown tool"
         r = await router.execute(
             ToolCall(id="c1", name="mcp__svc__fail", arguments={}),
-            _ctx(),
+            make_ctx(),
         )
         assert r.is_error
         assert "unknown tool" in r.content
@@ -700,25 +683,9 @@ def test_factory_propagates_tool_filter_and_secrets() -> None:
 def test_factory_validation_propagates() -> None:
     """Factories run the same McpServerConfig validation —
     bad server names / missing required args raise the same errors."""
-    import pytest
     with pytest.raises(ValueError, match="must not contain '__'"):
         McpToolset.http("bad__name", url="https://x")
     # http without url is impossible via factory (url is required kwarg)
     # — Python TypeError, not our ValueError. Test stdio mistake instead:
     with pytest.raises(TypeError):
         McpToolset.stdio("x")           # missing command kwarg
-
-
-# ---- helpers ----
-
-
-def _ctx() -> ToolCallContext:
-    import asyncio
-    from pathlib import Path
-
-    return ToolCallContext(
-        run_id="r", skill_name=None,
-        cancel=asyncio.Event(),
-        workspace=Path("/tmp"), storage=Path("/tmp"),
-        emit=lambda evt: None,
-    )
