@@ -62,12 +62,61 @@ def test_websearch_mcp_substitutes_auth_header(monkeypatch) -> None:
 
 
 def test_websearch_mcp_missing_secret_raises() -> None:
-    """Without DASHSCOPE_API_KEY, ${VAR} substitution fails at construct."""
+    """Without DASHSCOPE_API_KEY, MCP ${VAR} substitution fails at construct."""
+    import os
+    saved = os.environ.pop("DASHSCOPE_API_KEY", None)
+    try:
+        # Pass an explicit stub model so the Qwen-LLM path doesn't fire first.
+        with pytest.raises(KeyError, match="DASHSCOPE_API_KEY"):
+            build_agent(model=_StubProvider())
+    finally:
+        if saved is not None:
+            os.environ["DASHSCOPE_API_KEY"] = saved
+
+
+def test_qwen_llm_built_by_default(monkeypatch) -> None:
+    """build_agent() with no `model=` constructs a Qwen LiteLlm bound to
+    DashScope's OpenAI-compatible endpoint."""
+    from agent_kit.contrib.providers.litellm import LiteLlm
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "sk-fake")
+    monkeypatch.delenv("QWEN_THINKING", raising=False)
+    agent = build_agent()
+    assert isinstance(agent.model, LiteLlm)
+    assert agent.model.model == "openai/qwen3.6-plus"
+    assert agent.model._kwargs["api_base"] == (
+        "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    )
+    assert agent.model._kwargs["api_key"] == "sk-fake"
+    # thinking off by default → no extra_body
+    assert "extra_body" not in agent.model._kwargs
+
+
+def test_qwen_thinking_mode_opt_in(monkeypatch) -> None:
+    """QWEN_THINKING=1 + QWEN_THINKING_BUDGET=N → extra_body passed to LiteLLM."""
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "sk-fake")
+    monkeypatch.setenv("QWEN_THINKING", "1")
+    monkeypatch.setenv("QWEN_THINKING_BUDGET", "8000")
+    agent = build_agent()
+    eb = agent.model._kwargs["extra_body"]
+    assert eb == {"enable_thinking": True, "thinking_budget": 8000}
+
+
+def test_qwen_model_override(monkeypatch) -> None:
+    """QWEN_MODEL env switches the Qwen variant."""
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "sk-fake")
+    monkeypatch.setenv("QWEN_MODEL", "qwen-turbo")
+    agent = build_agent()
+    assert agent.model.model == "openai/qwen-turbo"
+
+
+def test_qwen_missing_key_raises_friendly() -> None:
+    """Without DASHSCOPE_API_KEY, the Qwen LLM builder raises early with
+    a clear message (not a cryptic LiteLLM error mid-run)."""
     import os
     saved = os.environ.pop("DASHSCOPE_API_KEY", None)
     try:
         with pytest.raises(KeyError, match="DASHSCOPE_API_KEY"):
-            build_agent(model=_StubProvider())
+            build_agent()       # default path → tries to build Qwen → raises
     finally:
         if saved is not None:
             os.environ["DASHSCOPE_API_KEY"] = saved

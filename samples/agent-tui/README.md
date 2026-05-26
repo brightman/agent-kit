@@ -3,15 +3,17 @@
 A two-pane terminal UI that drives an `agent_kit.Agent` and **renders every
 event live** as the agent thinks, calls tools, and replies.
 
-The pre-wired agent has two real capabilities:
+The pre-wired agent has three real pieces:
 
-| Capability | Provider |
+| Piece | Provider |
 |---|---|
+| **LLM** | **Qwen3.6-Plus** via DashScope's OpenAI-compatible endpoint (LiteLLM `openai/qwen3.6-plus` + custom `api_base`); reasoning / thinking mode opt-in via env |
 | **`skill-creator`** skill | Anthropic's official [skill-creator](https://github.com/anthropics/skills/tree/main/skills/skill-creator) (vendored under `app/skills/`) |
 | **WebSearch** MCP | Aliyun Bailian (`https://dashscope.aliyuncs.com/.../WebSearch/mcp`), streamable HTTP |
 
-So you can ask it to *"search the web for X"* OR *"help me design a new
-SKILL.md for Y"* — and watch the loop in real time.
+All three are powered by a **single `DASHSCOPE_API_KEY`**. So you can ask
+the agent to *"search the web for X"* OR *"help me design a new SKILL.md
+for Y"* — and watch the loop in real time.
 
 ## Layout
 
@@ -47,15 +49,45 @@ pip install "textual>=0.50"          # the TUI lib
 
 cd samples/agent-tui
 cp .env.example .env
-# edit .env:
-#   DASHSCOPE_API_KEY=...     (required — WebSearch MCP auth)
-#   GOOGLE_API_KEY=...        (or any LiteLLM-supported provider)
+# Edit .env, set just ONE key:
+#   DASHSCOPE_API_KEY=sk-...   (powers Qwen LLM + WebSearch MCP)
 
-# load .env into your shell
+# Load .env into your shell
 set -a; source .env; set +a
 
 PYTHONPATH=../.. python -m app.tui
 ```
+
+### Switch model / enable thinking mode
+
+```bash
+# Different Qwen flavor
+export QWEN_MODEL=qwen-max          # or qwen-turbo, qwen-plus, ...
+
+# Turn on Qwen3.6 reasoning / thinking mode (default: off)
+export QWEN_THINKING=1
+export QWEN_THINKING_BUDGET=4000    # tokens of thinking budget
+
+PYTHONPATH=../.. python -m app.tui
+```
+
+### Use a completely different LLM (Claude / GPT / Gemini)
+
+```bash
+# Bypass Qwen by passing your own model string:
+DASHSCOPE_API_KEY=sk-... \
+  MODEL=anthropic/claude-3-5-sonnet-20240620 \
+  ANTHROPIC_API_KEY=sk-ant-... \
+  PYTHONPATH=../.. python -c "
+from app.agent import build_agent
+from app.tui import AgentTui
+import os
+AgentTui().run()
+"
+```
+
+…or edit `app/tui.py::AgentTui.__init__` to pass `model=...` into
+`build_agent(...)`.
 
 The TUI launches; type a question at the bottom prompt. Examples that
 exercise both tools:
@@ -129,8 +161,13 @@ These verify:
 
 ## Customizing
 
-- **Different LLM** — set `MODEL=anthropic/claude-3-5-sonnet-20240620` (or
-  any LiteLLM string) plus the corresponding key
+- **Different Qwen variant** — `export QWEN_MODEL=qwen-max` (or `qwen-turbo`,
+  `qwen-plus`, etc.)
+- **Qwen3.6 thinking mode** — `export QWEN_THINKING=1` + optionally
+  `QWEN_THINKING_BUDGET=4000`. Off by default for speed
+- **Completely different LLM** — pass `build_agent(model="anthropic/...")`
+  or your own `LlmProvider` instance; the Qwen default is just the
+  no-args path
 - **Different MCP server** — edit `app/agent.py::_build_websearch_mcp` or
   add another `McpToolset.http(...)` / `.stdio(...)` to the `tools=` list
 - **More skills** — drop another `<skill-name>/SKILL.md` (+ optional
