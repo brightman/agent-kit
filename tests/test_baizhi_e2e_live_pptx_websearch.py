@@ -1,11 +1,19 @@
-"""Live Baizhi E2E: LLM + WebSearch MCP + pptx skill + PPT artifact.
+"""Live Baizhi E2E — LLM + WebSearch MCP + pptx skill + real PPT artifact.
 
-This test is intentionally opt-in because it spends real LLM/MCP quota:
+**双重身份**:
+1. **回归测试** —— pptx skill + DashScope WebSearch + baizhi 真 LLM 整链
+   端到端跑通,产出 ≥5 张幻灯片含 "Anthropic" 的真 .pptx。
+2. **新 ergonomics 的展示样板** —— 用 `Agent` + `LiteLlm` + `McpToolset.http()`
+   工厂,而不是手写 provider adapter + Runner / RunRequest 拼装。Stage 5
+   修订(spec § 17 / § 7.5.2 / § 7.5.3)后这是 hello-world 的标准形态;原来
+   ~500 行的 test 现在 ~200 行,业务量(_PptxDeckToolset)反而更显眼。
 
-    RUN_BAIZHI_E2E=1 .venv/bin/python -m pytest \
+opt-in 跑法(spends real LLM / WebSearch quota):
+
+    RUN_BAIZHI_E2E=1 .venv/bin/python -m pytest \\
       tests/test_baizhi_e2e_live_pptx_websearch.py -q -s
 
-Keys are loaded from baizhi-agent/.baizhi-agent/config/.env and never printed.
+Keys 从 baizhi-agent/.baizhi-agent/config/.env 加载,不打印。
 """
 
 from __future__ import annotations
@@ -13,24 +21,19 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import time
-import urllib.error
-import urllib.request
-from contextlib import AsyncExitStack
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Awaitable, Callable, TypeVar
+from typing import Any
 
 import pytest
 
+from agent_kit import Agent
+from agent_kit.contrib.providers.litellm import LiteLlm
 from agent_kit.contrib.skills import FilesystemSkillRegistry
-from agent_kit.loop import RunRequest
-from agent_kit.mcp import McpServerConfig, McpToolset
-from agent_kit.provider import LlmResponse, ToolSchema
-from agent_kit.runner import Runner
+from agent_kit.mcp import McpToolset
+from agent_kit.provider import ToolSchema
 from agent_kit.skill import SkillCatalogToolset
 from agent_kit.toolset import BaseToolset, ToolCallContext
-from agent_kit.types import Message, ToolCall, ToolResult
+from agent_kit.types import ToolCall, ToolResult
 
 
 BAIZHI_AGENT_ROOT = Path(__file__).resolve().parents[2] / "baizhi-agent"
@@ -40,63 +43,9 @@ WEBSEARCH_URL = "https://dashscope.aliyuncs.com/api/v1/mcps/WebSearch/mcp"
 TASK = "深度搜索anthropic 关于AI Native orgnization组织方式的材料，生成一份可以分享的ppt"
 
 
-T = TypeVar("T")
-
-
-# Transient = OS / network glitch we expect to clear on next attempt.
-# Observed on macOS during live runs:
-#   - EADDRNOTAVAIL (Errno 49) when the kernel can't allocate a source port
-#   - timeouts during DNS / TLS / first byte
-#   - 502 / 503 / 504 from the gateway
-# Auth failures (401 / 403) and 4xx user errors are NOT transient — they
-# come straight up.
-_TRANSIENT_HTTP_STATUS = {429, 502, 503, 504}
-_TRANSIENT_OS_ERRNO = {49, 60, 61, 65, 110}  # EADDRNOTAVAIL/ETIMEDOUT/ECONNREFUSED/ENETUNREACH
-
-
-def _is_transient(exc: BaseException) -> bool:
-    """Return True for known-flaky network/OS errors, recursing into
-    BaseExceptionGroup so anyio-wrapped MCP failures are recognized too."""
-    if isinstance(exc, BaseExceptionGroup):
-        return any(_is_transient(sub) for sub in exc.exceptions)
-    if isinstance(exc, urllib.error.HTTPError):
-        return exc.code in _TRANSIENT_HTTP_STATUS
-    if isinstance(exc, urllib.error.URLError):
-        # URLError wraps OS errors via .reason
-        reason = exc.reason
-        if isinstance(reason, OSError) and reason.errno in _TRANSIENT_OS_ERRNO:
-            return True
-        if isinstance(reason, TimeoutError):
-            return True
-        return False
-    if isinstance(exc, OSError) and exc.errno in _TRANSIENT_OS_ERRNO:
-        return True
-    if isinstance(exc, (TimeoutError, asyncio.TimeoutError)):
-        return True
-    return False
-
-
-async def _retry_transient(
-    fn: Callable[[], Awaitable[T]],
-    *,
-    attempts: int = 3,
-    base_delay: float = 0.5,
-) -> T:
-    """Run `fn` up to `attempts` times, sleeping `base_delay * 2**i` between
-    attempts on transient failures. Non-transient = first exception re-raised."""
-    last: BaseException | None = None
-    for i in range(attempts):
-        try:
-            return await fn()
-        except BaseException as exc:  # noqa: BLE001
-            if not _is_transient(exc):
-                raise
-            last = exc
-            if i == attempts - 1:
-                break
-            await asyncio.sleep(base_delay * (2 ** i))
-    assert last is not None
-    raise last
+# ---------------------------------------------------------------------------
+# env loader — pull keys from baizhi-agent/.baizhi-agent/config/.env
+# ---------------------------------------------------------------------------
 
 
 def _load_env_file(path: Path) -> None:
@@ -110,144 +59,51 @@ def _load_env_file(path: Path) -> None:
         os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
 
 
-@dataclass
-class _MiniMaxAgentKitProvider:
-    api_key: str
-    model: str
-    base_url: str
-    max_tokens: int = 4096
-    timeout_seconds: float = 120.0
-
-    name = "minimax-live"
-
-    async def chat(
-        self,
-        messages: list[Message],
-        tools: list[ToolSchema] | None = None,
-        *,
-        temperature: float = 0.2,
-        max_tokens: int | None = None,
-    ) -> LlmResponse:
-        payload: dict[str, Any] = {
-            "model": self.model,
-            "messages": [_encode_message(m) for m in messages],
-            "max_tokens": max_tokens or self.max_tokens,
-            "temperature": temperature,
-            "reasoning_split": True,
-        }
-        if tools:
-            payload["tools"] = [_encode_tool(t) for t in tools]
-            payload["tool_choice"] = "auto"
-
-        started = time.perf_counter()
-        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        url = f"{self.base_url.rstrip('/')}/chat/completions"
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
-
-        # spec § 4.5:provider 应当自己重试 transient error
-        async def _one_call() -> dict[str, Any]:
-            def _blocking() -> dict[str, Any]:
-                req = urllib.request.Request(
-                    url, data=body, headers=headers, method="POST"
-                )
-                with urllib.request.urlopen(req, timeout=self.timeout_seconds) as r:
-                    return json.loads(r.read().decode("utf-8"))
-
-            return await asyncio.to_thread(_blocking)
-
-        raw = await _retry_transient(_one_call, attempts=3, base_delay=0.5)
-        duration_ms = max(1, round((time.perf_counter() - started) * 1000))
-        choice = raw["choices"][0]
-        message = choice["message"]
-        usage = raw.get("usage") or {}
-        return LlmResponse(
-            text=(message.get("content") or "").strip(),
-            tool_calls=_decode_tool_calls(message.get("tool_calls") or []),
-            usage={
-                "input_tokens": int(usage.get("prompt_tokens") or 0),
-                "output_tokens": int(usage.get("completion_tokens") or 0),
-                "duration_ms": duration_ms,
-            },
-            finish_reason=choice.get("finish_reason"),
-        )
-
-    async def chat_stream(self, *args: Any, **kwargs: Any):
-        raise NotImplementedError
-
-
-def _encode_message(message: Message) -> dict[str, Any]:
-    if message.role == "assistant" and message.tool_calls:
-        return {
-            "role": "assistant",
-            "content": message.content or None,
-            "tool_calls": [
-                {
-                    "id": call.id,
-                    "type": "function",
-                    "function": {
-                        "name": call.name,
-                        "arguments": json.dumps(call.arguments, ensure_ascii=False),
-                    },
-                }
-                for call in message.tool_calls
-            ],
-        }
-    if message.role == "tool":
-        return {
-            "role": "tool",
-            "tool_call_id": message.tool_call_id,
-            "content": message.content,
-        }
-    return {"role": message.role, "content": message.content}
-
-
-def _encode_tool(tool: ToolSchema) -> dict[str, Any]:
-    return {
-        "type": "function",
-        "function": {
-            "name": tool.name,
-            "description": tool.description,
-            "parameters": tool.parameters,
-        },
-    }
-
-
-def _decode_tool_calls(raw_calls: list[dict[str, Any]]) -> list[ToolCall]:
-    calls: list[ToolCall] = []
-    for index, raw in enumerate(raw_calls):
-        fn = raw.get("function") or {}
-        args = fn.get("arguments") or {}
-        if isinstance(args, str):
-            try:
-                args = json.loads(args) if args else {}
-            except json.JSONDecodeError:
-                args = {"__raw_arguments__": args}
-        calls.append(
-            ToolCall(
-                id=raw.get("id") or f"call_{index}",
-                name=fn.get("name") or "",
-                arguments=args if isinstance(args, dict) else {},
-            )
-        )
-    return calls
+# ---------------------------------------------------------------------------
+# MCP connect retry — macOS-specific EADDRNOTAVAIL mitigation (test-only)
+#
+# We observed ~25% of live runs flaking at MCP HTTP transport setup with
+# `[Errno 49] Can't assign requested address` wrapped by anyio's TaskGroup.
+# It's an OS-level source-port exhaustion glitch, not an MCP issue. LiteLLM's
+# `num_retries` doesn't help because MCP isn't routed through LiteLLM.
+# We absorb it here with a thin subclass that retries `.connect()`. spec § 7.2
+# leaves lifecycle to the use site, so this stays out of the SDK proper.
+# ---------------------------------------------------------------------------
 
 
 class _RetryingMcpToolset(McpToolset):
-    """McpToolset whose `connect()` retries transient OS / network errors.
-
-    The macOS environment running these tests intermittently fails the
-    HTTP transport handshake with `EADDRNOTAVAIL`(Errno 49)wrapped by
-    anyio's TaskGroup as an ExceptionGroup; without retry, ~25% of live
-    runs flake at setup. spec § 7.2 leaves lifecycle to the use site, so
-    putting retry **outside** the SDK in a test-side subclass keeps the
-    base McpToolset honest about being a single-shot wrapper.
-    """
+    """Retries `connect()` on transient EADDRNOTAVAIL / TaskGroup-wrapped variants."""
 
     async def connect(self) -> None:
-        await _retry_transient(super().connect, attempts=3, base_delay=1.0)
+        last_exc: BaseException | None = None
+        for attempt in range(3):
+            try:
+                await super().connect()
+                return
+            except BaseException as exc:  # noqa: BLE001
+                if not _is_transient_connect_error(exc):
+                    raise
+                last_exc = exc
+                if attempt < 2:
+                    await asyncio.sleep(0.5 * (2 ** attempt))
+        assert last_exc is not None
+        raise last_exc
+
+
+def _is_transient_connect_error(exc: BaseException) -> bool:
+    if isinstance(exc, BaseExceptionGroup):
+        return any(_is_transient_connect_error(sub) for sub in exc.exceptions)
+    if isinstance(exc, OSError) and exc.errno in {49, 60, 61, 65, 110}:
+        # EADDRNOTAVAIL / ETIMEDOUT / ECONNREFUSED / ENETUNREACH
+        return True
+    if isinstance(exc, (TimeoutError, asyncio.TimeoutError)):
+        return True
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Business toolset — write a real .pptx with python-pptx
+# ---------------------------------------------------------------------------
 
 
 class _PptxDeckToolset(BaseToolset):
@@ -413,6 +269,11 @@ def _write_minimal_pptx(
     prs.save(output_path)
 
 
+# ---------------------------------------------------------------------------
+# The test — note how concise it is post-§17. Hello-world style.
+# ---------------------------------------------------------------------------
+
+
 @pytest.mark.live
 @pytest.mark.asyncio
 async def test_live_llm_websearch_and_pptx_artifact(tmp_path: Path) -> None:
@@ -424,29 +285,21 @@ async def test_live_llm_websearch_and_pptx_artifact(tmp_path: Path) -> None:
     if not os.environ.get("DASHSCOPE_API_KEY"):
         pytest.skip("DASHSCOPE_API_KEY missing in baizhi-agent/.baizhi-agent/config/.env")
 
-    provider = _MiniMaxAgentKitProvider(
+    # MiniMax is OpenAI-compatible — LiteLLM routes via the `openai/` prefix
+    # with explicit `api_base`. `num_retries=2` handles LLM-side transient errors
+    # (502 / 503 / network blips). MCP-side retry stays in _RetryingMcpToolset.
+    model_name = os.environ.get("MINIMAX_MODEL", "MiniMax-M2.7")
+    model = LiteLlm(
+        f"openai/{model_name}",
+        api_base=os.environ.get("MINIMAX_BASE_URL", "https://api.minimaxi.com/v1"),
         api_key=os.environ["MINIMAX_API_KEY"],
-        model=os.environ.get("MINIMAX_MODEL", "MiniMax-M2.7"),
-        base_url=os.environ.get("MINIMAX_BASE_URL", "https://api.minimaxi.com/v1"),
-        max_tokens=int(os.environ.get("MINIMAX_MAX_TOKENS", "4096")),
+        num_retries=2,
     )
-    skill_catalog = SkillCatalogToolset(
-        FilesystemSkillRegistry(BUNDLED_SKILLS_ROOT),
-        tenant_id="tenant-baizhi-e2e",
-    )
-    websearch = _RetryingMcpToolset(
-        McpServerConfig(
-            name="web-search",
-            transport="http",
-            url=WEBSEARCH_URL,
-            headers={"Authorization": "Bearer ${DASHSCOPE_API_KEY}"},
-            connect_timeout=60,
-        )
-    )
-    runner = Runner(
-        provider,
-        toolsets=[skill_catalog, websearch, _PptxDeckToolset()],
-        system_prelude=(
+
+    agent = Agent(
+        name="baizhi-pptx-deck",
+        model=model,
+        instruction=(
             "You are running a live E2E test. You MUST use tools before the final answer. "
             "Required sequence: first call load_skill for pptx, then call "
             "load_skill_resource for pptxgenjs.md, then call the WebSearch MCP tool "
@@ -455,19 +308,30 @@ async def test_live_llm_websearch_and_pptx_artifact(tmp_path: Path) -> None:
             "Do not claim completion until create_pptx_deck returns a pptx_path. "
             "Keep the deck concise, 5-8 content slides, Chinese language, with sources."
         ),
+        tools=[
+            SkillCatalogToolset(
+                FilesystemSkillRegistry(BUNDLED_SKILLS_ROOT),
+                tenant_id="tenant-baizhi-e2e",
+            ),
+            _RetryingMcpToolset.http(
+                "web-search",
+                url=WEBSEARCH_URL,
+                headers={"Authorization": "Bearer ${DASHSCOPE_API_KEY}"},
+                connect_timeout=60,
+            ),
+            _PptxDeckToolset(),
+        ],
         workspace_root=tmp_path / "runs",
         storage_root=tmp_path / "storage",
+        default_max_rounds=12,
+        default_temperature=0.1,
+        default_max_tokens=int(os.environ.get("MINIMAX_MAX_TOKENS", "4096")),
     )
 
-    result = await runner.run_to_completion(
-        RunRequest(
-            tenant_id="tenant-baizhi-e2e",
-            agent_id="agent-live-deck",
-            user_message=TASK,
-            enabled_skills=["pptx"],
-            max_rounds=12,
-            temperature=0.1,
-        )
+    result = await agent.run(
+        TASK,
+        tenant_id="tenant-baizhi-e2e",
+        enabled_skills=["pptx"],
     )
 
     tool_names = [
