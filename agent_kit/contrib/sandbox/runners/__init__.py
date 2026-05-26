@@ -1,10 +1,7 @@
-"""Reference SandboxRunner implementations (spec § 16.3).
-
-Stages C-D ship `LocalDirRunner` + `SrtRunner`. Stage E will add
-`McpSandboxRunner` alongside.
-"""
+"""Reference SandboxRunner implementations (spec § 16.3)."""
 
 from .localdir import LocalDirRunner
+from .mcp import McpSandboxRunner
 from .srt import SrtRunner
 
-__all__ = ["LocalDirRunner", "SrtRunner"]
+__all__ = ["LocalDirRunner", "McpSandboxRunner", "SrtRunner"]
