@@ -92,7 +92,7 @@ class _ProviderRaises:
 
 def _ctx(cancel: asyncio.Event | None = None) -> ToolCallContext:
     return ToolCallContext(
-        tenant_id="t1", run_id="r1", skill_name=None,
+        run_id="r1", skill_name=None,
         cancel=cancel or asyncio.Event(),
         workspace=Path("/tmp"), storage=Path("/tmp"),
         emit=lambda evt: None,
@@ -117,7 +117,7 @@ async def test_single_round_final_text() -> None:
         LlmResponse(text="hello world", tool_calls=[]),
     ])
     loop = AgentLoop(provider, toolsets=[])
-    req = RunRequest(tenant_id="t", agent_id="a", user_message="hi", max_rounds=3)
+    req = RunRequest(agent_id="a", user_message="hi", max_rounds=3)
     events = await _drain(loop.run(req, _ctx()))
     kinds = _kinds(events)
     assert kinds == [
@@ -138,7 +138,7 @@ async def test_tool_call_then_final_text() -> None:
     ts = _ScriptedToolset("test", {"echo": lambda args: f"echo:{args['x']}"})
     loop = AgentLoop(provider, toolsets=[ts])
     events = await _drain(loop.run(
-        RunRequest(tenant_id="t", agent_id="a", user_message="hi", max_rounds=5),
+        RunRequest(agent_id="a", user_message="hi", max_rounds=5),
         _ctx(),
     ))
     kinds = _kinds(events)
@@ -161,7 +161,7 @@ async def test_messages_thread_grows_with_tool_result() -> None:
     ts = _ScriptedToolset("test", {"get_x": "result_value"})
     loop = AgentLoop(provider, toolsets=[ts])
     await _drain(loop.run(
-        RunRequest(tenant_id="t", agent_id="a", user_message="hi", max_rounds=5),
+        RunRequest(agent_id="a", user_message="hi", max_rounds=5),
         _ctx(),
     ))
     # second chat call's messages should include user + assistant(tool_calls) + tool
@@ -177,7 +177,7 @@ async def test_system_prelude_emitted() -> None:
     provider = _ScriptedProvider([LlmResponse(text="ok", tool_calls=[])])
     loop = AgentLoop(provider, toolsets=[], system_prelude="GLOBAL")
     await _drain(loop.run(
-        RunRequest(tenant_id="t", agent_id="a", user_message="hi",
+        RunRequest(agent_id="a", user_message="hi",
                    system_prelude="REQ", max_rounds=2),
         _ctx(),
     ))
@@ -197,7 +197,7 @@ async def test_cancel_before_first_round() -> None:
     cancel = asyncio.Event()
     cancel.set()
     events = await _drain(loop.run(
-        RunRequest(tenant_id="t", agent_id="a", user_message="hi", max_rounds=3),
+        RunRequest(agent_id="a", user_message="hi", max_rounds=3),
         _ctx(cancel),
     ))
     assert _kinds(events) == ["cancelled"]
@@ -221,7 +221,7 @@ async def test_cancel_between_rounds() -> None:
     ts = _ScriptedToolset("t", {"echo": handler})
     loop = AgentLoop(provider, toolsets=[ts])
     events = await _drain(loop.run(
-        RunRequest(tenant_id="t", agent_id="a", user_message="hi", max_rounds=5),
+        RunRequest(agent_id="a", user_message="hi", max_rounds=5),
         _ctx(cancel),
     ))
     kinds = _kinds(events)
@@ -245,7 +245,7 @@ async def test_max_rounds_last_round_tools_masked() -> None:
     ts = _ScriptedToolset("t", {"loop_tool": "x"})
     loop = AgentLoop(provider, toolsets=[ts])
     events = await _drain(loop.run(
-        RunRequest(tenant_id="t", agent_id="a", user_message="hi", max_rounds=3),
+        RunRequest(agent_id="a", user_message="hi", max_rounds=3),
         _ctx(),
     ))
     # round 0, round 1 had tools; round 2 should have had tools=None
@@ -266,7 +266,7 @@ async def test_exhausted_max_rounds_emits_error() -> None:
     ts = _ScriptedToolset("t", {"loop_tool": "x"})
     loop = AgentLoop(provider, toolsets=[ts])
     events = await _drain(loop.run(
-        RunRequest(tenant_id="t", agent_id="a", user_message="hi", max_rounds=2),
+        RunRequest(agent_id="a", user_message="hi", max_rounds=2),
         _ctx(),
     ))
     last = events[-1]
@@ -292,7 +292,7 @@ async def test_compactor_triggers_emits_context_compacted_event() -> None:
                                      placeholder="[OMITTED]")
     loop = AgentLoop(provider, toolsets=[ts], compactor=compactor)
     events = await _drain(loop.run(
-        RunRequest(tenant_id="t", agent_id="a", user_message="hi", max_rounds=3),
+        RunRequest(agent_id="a", user_message="hi", max_rounds=3),
         _ctx(),
     ))
     kinds = _kinds(events)
@@ -325,7 +325,7 @@ async def test_compactor_breaks_pairs_emits_error_event() -> None:
     ts = _ScriptedToolset("t", {"t": "result"})
     loop = AgentLoop(provider, toolsets=[ts], compactor=_BadCompactor())
     events = await _drain(loop.run(
-        RunRequest(tenant_id="t", agent_id="a", user_message="hi", max_rounds=3),
+        RunRequest(agent_id="a", user_message="hi", max_rounds=3),
         _ctx(),
     ))
     err = events[-1]
@@ -347,7 +347,7 @@ async def test_before_model_short_circuit_skips_provider() -> None:
     provider = _ScriptedProvider([])   # exhausted; should not be called
     loop = AgentLoop(provider, toolsets=[], hooks=[_BeforeModelShortCircuits()])
     events = await _drain(loop.run(
-        RunRequest(tenant_id="t", agent_id="a", user_message="hi", max_rounds=3),
+        RunRequest(agent_id="a", user_message="hi", max_rounds=3),
         _ctx(),
     ))
     assert len(provider.calls) == 0
@@ -370,7 +370,7 @@ async def test_after_model_rewrites_response() -> None:
     provider = _ScriptedProvider([LlmResponse(text="orig", tool_calls=[])])
     loop = AgentLoop(provider, toolsets=[], hooks=[_AfterModelRewrites()])
     events = await _drain(loop.run(
-        RunRequest(tenant_id="t", agent_id="a", user_message="hi", max_rounds=2),
+        RunRequest(agent_id="a", user_message="hi", max_rounds=2),
         _ctx(),
     ))
     final = next(e for e in events if e.kind == "final_text")
@@ -394,7 +394,7 @@ async def test_before_tool_short_circuit_skips_real_execute() -> None:
     ts = _ScriptedToolset("t", {"real_tool": "should NOT run"})
     loop = AgentLoop(provider, toolsets=[ts], hooks=[_BeforeToolShortCircuits()])
     events = await _drain(loop.run(
-        RunRequest(tenant_id="t", agent_id="a", user_message="hi", max_rounds=3),
+        RunRequest(agent_id="a", user_message="hi", max_rounds=3),
         _ctx(),
     ))
     # toolset NOT called
@@ -424,7 +424,7 @@ async def test_after_tool_rewrites_result() -> None:
     ts = _ScriptedToolset("t", {"echo": "real_data"})
     loop = AgentLoop(provider, toolsets=[ts], hooks=[_AfterToolRewrites()])
     await _drain(loop.run(
-        RunRequest(tenant_id="t", agent_id="a", user_message="hi", max_rounds=3),
+        RunRequest(agent_id="a", user_message="hi", max_rounds=3),
         _ctx(),
     ))
     # toolset called (after_tool only rewrites the result)
@@ -460,7 +460,7 @@ async def test_first_non_none_wins_skips_later_hooks() -> None:
     provider = _ScriptedProvider([])
     loop = AgentLoop(provider, toolsets=[], hooks=[h1, h2, h3])
     events = await _drain(loop.run(
-        RunRequest(tenant_id="t", agent_id="a", user_message="hi", max_rounds=2),
+        RunRequest(agent_id="a", user_message="hi", max_rounds=2),
         _ctx(),
     ))
     final = next(e for e in events if e.kind == "final_text")
@@ -486,7 +486,7 @@ async def test_hook_exception_emits_error_event() -> None:
     ts = _ScriptedToolset("t", {"t": "x"})
     loop = AgentLoop(provider, toolsets=[ts], hooks=[_BeforeToolRaises()])
     events = await _drain(loop.run(
-        RunRequest(tenant_id="t", agent_id="a", user_message="hi", max_rounds=3),
+        RunRequest(agent_id="a", user_message="hi", max_rounds=3),
         _ctx(),
     ))
     err = events[-1]
@@ -504,7 +504,7 @@ async def test_hook_exception_emits_error_event() -> None:
 async def test_provider_exception_emits_error_event() -> None:
     loop = AgentLoop(_ProviderRaises(), toolsets=[])
     events = await _drain(loop.run(
-        RunRequest(tenant_id="t", agent_id="a", user_message="hi", max_rounds=2),
+        RunRequest(agent_id="a", user_message="hi", max_rounds=2),
         _ctx(),
     ))
     err = events[-1]
@@ -527,7 +527,7 @@ async def test_event_tree_parent_pointers() -> None:
     ts = _ScriptedToolset("t", {"echo": "y"})
     loop = AgentLoop(provider, toolsets=[ts])
     events = await _drain(loop.run(
-        RunRequest(tenant_id="t", agent_id="a", user_message="hi", max_rounds=3),
+        RunRequest(agent_id="a", user_message="hi", max_rounds=3),
         _ctx(),
     ))
     ids_seen: set[str] = set()
@@ -544,7 +544,7 @@ async def test_event_ids_unique() -> None:
     provider = _ScriptedProvider([LlmResponse(text="ok", tool_calls=[])])
     loop = AgentLoop(provider, toolsets=[])
     events = await _drain(loop.run(
-        RunRequest(tenant_id="t", agent_id="a", user_message="hi", max_rounds=2),
+        RunRequest(agent_id="a", user_message="hi", max_rounds=2),
         _ctx(),
     ))
     ids = [e.event_id for e in events]
@@ -556,7 +556,7 @@ async def test_round_start_parent_is_none() -> None:
     provider = _ScriptedProvider([LlmResponse(text="ok", tool_calls=[])])
     loop = AgentLoop(provider, toolsets=[])
     events = await _drain(loop.run(
-        RunRequest(tenant_id="t", agent_id="a", user_message="hi", max_rounds=2),
+        RunRequest(agent_id="a", user_message="hi", max_rounds=2),
         _ctx(),
     ))
     rs = next(e for e in events if e.kind == "round_start")

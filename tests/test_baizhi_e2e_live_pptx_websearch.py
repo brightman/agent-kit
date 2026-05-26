@@ -309,10 +309,7 @@ async def test_live_llm_websearch_and_pptx_artifact(tmp_path: Path) -> None:
             "Keep the deck concise, 5-8 content slides, Chinese language, with sources."
         ),
         tools=[
-            SkillCatalogToolset(
-                FilesystemSkillRegistry(BUNDLED_SKILLS_ROOT),
-                tenant_id="tenant-baizhi-e2e",
-            ),
+            SkillCatalogToolset(FilesystemSkillRegistry(BUNDLED_SKILLS_ROOT)),
             _RetryingMcpToolset.http(
                 "web-search",
                 url=WEBSEARCH_URL,
@@ -330,7 +327,6 @@ async def test_live_llm_websearch_and_pptx_artifact(tmp_path: Path) -> None:
 
     result = await agent.run(
         TASK,
-        tenant_id="tenant-baizhi-e2e",
         enabled_skills=["pptx"],
     )
 

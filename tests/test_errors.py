@@ -80,5 +80,5 @@ async def test_run_to_completion_raises_leaf_message_for_group() -> None:
     runner = Runner(_Dummy(), toolsets=[flaky])
     with pytest.raises(RuntimeError, match=r"ConnectionRefusedError.*EADDRNOTAVAIL|\[Errno 49\]"):
         await runner.run_to_completion(
-            RunRequest(tenant_id="t", agent_id="a", user_message="hi")
+            RunRequest(agent_id="a", user_message="hi")
         )

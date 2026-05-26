@@ -139,22 +139,22 @@ class _FakeRegistry(SkillRegistry):
     def add(self, skill: Skill) -> None:
         self._skills[skill.name] = skill
 
-    async def list(self, tenant_id: str):
+    async def list(self):
         return [s.frontmatter for s in self._skills.values()]
 
-    async def load(self, tenant_id: str, name: str, version: str | None = None):
+    async def load(self, name: str, version: str | None = None):
         if name not in self._skills:
             raise KeyError(name)
         return self._skills[name]
 
-    async def save_draft(self, tenant_id, name, md, files): ...
-    async def publish(self, tenant_id, name) -> str:
+    async def save_draft(self, name, md, files): ...
+    async def publish(self, name) -> str:
         return "0"
 
 
 def _ctx() -> ToolCallContext:
     return ToolCallContext(
-        tenant_id="t1", run_id="r1", skill_name=None,
+        run_id="r1", skill_name=None,
         cancel=asyncio.Event(), workspace=Path("/tmp"), storage=Path("/tmp"),
         emit=lambda evt: None,
     )
@@ -173,13 +173,13 @@ def _make_skill(name: str, body: str = "body", files: dict[str, bytes] | None = 
 
 def test_catalog_build_schemas_three_tools() -> None:
     reg = _FakeRegistry()
-    ts = SkillCatalogToolset(reg, tenant_id="t1")
+    ts = SkillCatalogToolset(reg)
     names = [s.name for s in ts.build_schemas()]
     assert set(names) == {"list_skills", "load_skill", "load_skill_resource"}
 
 
 def test_catalog_name() -> None:
-    ts = SkillCatalogToolset(_FakeRegistry(), "t1")
+    ts = SkillCatalogToolset(_FakeRegistry())
     assert ts.name == "skill_catalog"
 
 
@@ -188,7 +188,7 @@ async def test_catalog_list_skills_returns_json() -> None:
     reg = _FakeRegistry()
     reg.add(_make_skill("a"))
     reg.add(_make_skill("b"))
-    ts = SkillCatalogToolset(reg, "t1")
+    ts = SkillCatalogToolset(reg)
     r = await ts.execute(ToolCall(id="1", name="list_skills", arguments={}), _ctx())
     assert not r.is_error
     items = json.loads(r.content)
@@ -200,7 +200,7 @@ async def test_catalog_list_skills_returns_json() -> None:
 async def test_catalog_load_skill_returns_body() -> None:
     reg = _FakeRegistry()
     reg.add(_make_skill("hello", body="# Hello\n\nThis is hello."))
-    ts = SkillCatalogToolset(reg, "t1")
+    ts = SkillCatalogToolset(reg)
     r = await ts.execute(
         ToolCall(id="1", name="load_skill", arguments={"name": "hello"}), _ctx()
     )
@@ -211,7 +211,7 @@ async def test_catalog_load_skill_returns_body() -> None:
 @pytest.mark.asyncio
 async def test_catalog_load_skill_missing_returns_error() -> None:
     reg = _FakeRegistry()
-    ts = SkillCatalogToolset(reg, "t1")
+    ts = SkillCatalogToolset(reg)
     r = await ts.execute(
         ToolCall(id="1", name="load_skill", arguments={"name": "nope"}), _ctx()
     )
@@ -221,7 +221,7 @@ async def test_catalog_load_skill_missing_returns_error() -> None:
 
 @pytest.mark.asyncio
 async def test_catalog_load_skill_missing_name_arg() -> None:
-    ts = SkillCatalogToolset(_FakeRegistry(), "t1")
+    ts = SkillCatalogToolset(_FakeRegistry())
     r = await ts.execute(
         ToolCall(id="1", name="load_skill", arguments={}), _ctx()
     )
@@ -233,7 +233,7 @@ async def test_catalog_load_skill_missing_name_arg() -> None:
 async def test_catalog_load_resource_text() -> None:
     reg = _FakeRegistry()
     reg.add(_make_skill("x", files={"helper.py": b"print('hi')\n"}))
-    ts = SkillCatalogToolset(reg, "t1")
+    ts = SkillCatalogToolset(reg)
     r = await ts.execute(
         ToolCall(id="1", name="load_skill_resource",
                  arguments={"name": "x", "path": "helper.py"}),
@@ -248,7 +248,7 @@ async def test_catalog_load_resource_binary_base64() -> None:
     reg = _FakeRegistry()
     binary = bytes([0xff, 0xfe, 0xfd, 0xfc])
     reg.add(_make_skill("x", files={"img.bin": binary}))
-    ts = SkillCatalogToolset(reg, "t1")
+    ts = SkillCatalogToolset(reg)
     r = await ts.execute(
         ToolCall(id="1", name="load_skill_resource",
                  arguments={"name": "x", "path": "img.bin"}),
@@ -264,7 +264,7 @@ async def test_catalog_load_resource_binary_base64() -> None:
 async def test_catalog_load_resource_missing_path() -> None:
     reg = _FakeRegistry()
     reg.add(_make_skill("x", files={}))
-    ts = SkillCatalogToolset(reg, "t1")
+    ts = SkillCatalogToolset(reg)
     r = await ts.execute(
         ToolCall(id="1", name="load_skill_resource",
                  arguments={"name": "x", "path": "nope.py"}),
@@ -276,7 +276,7 @@ async def test_catalog_load_resource_missing_path() -> None:
 
 @pytest.mark.asyncio
 async def test_catalog_unknown_tool_returns_error() -> None:
-    ts = SkillCatalogToolset(_FakeRegistry(), "t1")
+    ts = SkillCatalogToolset(_FakeRegistry())
     r = await ts.execute(
         ToolCall(id="1", name="unknown_tool", arguments={}), _ctx()
     )

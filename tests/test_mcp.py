@@ -425,7 +425,7 @@ async def test_lifecycle_per_run_via_runner() -> None:
 
     runner = Runner(_Echoer(), toolsets=[ts])
     result = await runner.run_to_completion(
-        RunRequest(tenant_id="t", agent_id="a", user_message="hi", max_rounds=2)
+        RunRequest(agent_id="a", user_message="hi", max_rounds=2)
     )
     assert result.error is None
     # Runner.run finally called loop.aclose → router.aclose → ts.aclose
@@ -490,7 +490,7 @@ async def test_runner_prewarms_mcp_toolset(tmp_path) -> None:
 
     runner = Runner(_Probe(), toolsets=[ts], workspace_root=tmp_path / "ws")
     result = await runner.run_to_completion(
-        RunRequest(tenant_id="t", agent_id="a", user_message="hi", max_rounds=2)
+        RunRequest(agent_id="a", user_message="hi", max_rounds=2)
     )
     assert result.error is None
     names = {t.name for t in (_Probe.captured_tools or [])}
@@ -522,7 +522,7 @@ async def test_runner_prewarm_failure_emits_setup_error(tmp_path) -> None:
 
     runner = Runner(_Dummy(), toolsets=[flaky], workspace_root=tmp_path / "ws")
     events = [e async for e in runner.run(
-        RunRequest(tenant_id="t", agent_id="a", user_message="hi")
+        RunRequest(agent_id="a", user_message="hi")
     )]
     error_evts = [e for e in events if e.kind == "error"]
     assert len(error_evts) == 1
@@ -717,7 +717,7 @@ def _ctx() -> ToolCallContext:
     from pathlib import Path
 
     return ToolCallContext(
-        tenant_id="t", run_id="r", skill_name=None,
+        run_id="r", skill_name=None,
         cancel=asyncio.Event(),
         workspace=Path("/tmp"), storage=Path("/tmp"),
         emit=lambda evt: None,

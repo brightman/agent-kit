@@ -10,9 +10,9 @@
   可以直接 `agent.runner.run_to_completion(RunRequest(...))` 走全自由路径
 - **Long-lived Runner**:`Agent` 内部持有一个 Runner 实例,跨多次 `.run()`
   调用复用 —— toolsets 的 MCP session 不会每次重建
-- **`tenant_id` 不在 Agent 上**:多租户是上层应用的概念(spec § 1 non-goal);
-  `run()/run_sync()` 签名给 `tenant_id="default"` 当 keyword 默认,多租户
-  使用方每次传
+- **没有 tenant_id 概念**(spec § 1,2026-05-25 修订):多租户应用层每个
+  tenant new 一份 Agent + per-tenant `SkillRegistry` / `workspace_provider`
+  closure。SDK 自身完全 tenant-agnostic
 - **`model=string` 走 LiteLlm extras**:`"gemini/..."` / `"anthropic/..."` /
   `"openai/..."` 等 LiteLLM 路由格式 → 自动包成 `LiteLlm` provider
   (需 `pip install "agent-kit[litellm]"`);否则给清晰 ImportError
@@ -64,8 +64,9 @@ class Agent:
             tools=[...],
         )
 
-        # 多租户使用方
-        result = await agent.run("query", tenant_id="user_42")
+        # 多租户使用方:per-tenant Agent(SDK 自身不带 tenant 概念)
+        agent_for_42 = Agent(name="r", model=..., skills=registry_for_42, ...)
+        result = await agent_for_42.run("query")
 
         # advanced:拿底层 Runner
         result = await agent.runner.run_to_completion(RunRequest(...))
@@ -88,8 +89,8 @@ class Agent:
     default_temperature: float = 0.7
     default_max_tokens: int | None = None
 
-    # 注意:**没有 `default_tenant_id`**。`tenant_id` 是 `.run()` 的 keyword
-    # 参数,默认 "default";多租户使用方每次传(spec § 17.2)
+    # 注意:**没有任何 tenant_id 字段**(spec § 1 修订 2026-05-25)。
+    # 多租户应用层每个 tenant new 一份 Agent;SDK 自身完全 tenant-agnostic
 
     def __post_init__(self) -> None:
         # str → LiteLlm wrapper(需 extras)
@@ -120,7 +121,6 @@ class Agent:
         self,
         user_message: str,
         *,
-        tenant_id: str = "default",
         enabled_skills: list[str] | None = None,
         max_rounds: int | None = None,
         temperature: float | None = None,
@@ -134,7 +134,6 @@ class Agent:
         return await self._runner.run_to_completion(
             self._build_request(
                 user_message,
-                tenant_id=tenant_id,
                 enabled_skills=enabled_skills,
                 max_rounds=max_rounds,
                 temperature=temperature,
@@ -149,7 +148,6 @@ class Agent:
         self,
         user_message: str,
         *,
-        tenant_id: str = "default",
         enabled_skills: list[str] | None = None,
         max_rounds: int | None = None,
         temperature: float | None = None,
@@ -167,7 +165,6 @@ class Agent:
         return self._runner.run_sync(
             self._build_request(
                 user_message,
-                tenant_id=tenant_id,
                 enabled_skills=enabled_skills,
                 max_rounds=max_rounds,
                 temperature=temperature,
@@ -184,7 +181,6 @@ class Agent:
         self,
         user_message: str,
         *,
-        tenant_id: str,
         enabled_skills: list[str] | None,
         max_rounds: int | None,
         temperature: float | None,
@@ -194,7 +190,6 @@ class Agent:
         metadata: dict[str, Any] | None,
     ) -> RunRequest:
         return RunRequest(
-            tenant_id=tenant_id,
             agent_id=self.name,
             user_message=user_message,
             enabled_skills=list(enabled_skills) if enabled_skills else [],

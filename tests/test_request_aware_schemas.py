@@ -10,7 +10,7 @@ Coverage:
 - Router collision 每个 run 都重新检测,失败 → setup error event
 - 静态 toolset 不受影响,行为一致
 - baizhi 风格的 per-request 过滤示例(by enabled_skills)
-- MCP allow-list 风格的过滤示例(by tenant_id)
+- MCP allow-list 风格的过滤示例(by request.metadata)
 """
 
 from __future__ import annotations
@@ -84,7 +84,10 @@ class _TenantAclMcpStyleToolset(BaseToolset):
 
     def build_schemas_for_request(self, request: RunRequest) -> list[ToolSchema]:
         full = self.build_schemas()
-        allow = self._acl.get(request.tenant_id)
+        # Application stuffs tenant key into request.metadata —— SDK 不带
+        # tenant 概念,但 metadata 是 caller 自由 dict,可以承载任何 application
+        # 层信息(tenant id / user role / experiment flag / 等)
+        allow = self._acl.get(request.metadata.get("tenant"))
         if allow is None:
             return full
         return [s for s in full if s.name in allow]
@@ -95,7 +98,6 @@ class _TenantAclMcpStyleToolset(BaseToolset):
 
 def _ctx() -> ToolCallContext:
     return ToolCallContext(
-        tenant_id="t",
         run_id="r",
         skill_name=None,
         cancel=asyncio.Event(),
@@ -106,7 +108,7 @@ def _ctx() -> ToolCallContext:
 
 
 def _req(**overrides) -> RunRequest:
-    base = dict(tenant_id="t", agent_id="a", user_message="x", max_rounds=2)
+    base = dict(agent_id="a", user_message="x", max_rounds=2)
     base.update(overrides)
     return RunRequest(**base)
 
@@ -290,8 +292,8 @@ async def test_tenant_acl_filters_mcp_style_tools() -> None:
     )
     loop = AgentLoop(provider, toolsets=[acl_ts])
 
-    [e async for e in loop.run(_req(tenant_id="alice"), _ctx())]
-    [e async for e in loop.run(_req(tenant_id="bob"), _ctx())]
+    [e async for e in loop.run(_req(metadata={"tenant": "alice"}), _ctx())]
+    [e async for e in loop.run(_req(metadata={"tenant": "bob"}), _ctx())]
 
     assert provider.tool_lists[0] == ["search"]
     assert set(provider.tool_lists[1]) == {"search", "fetch"}

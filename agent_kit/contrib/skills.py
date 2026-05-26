@@ -10,7 +10,8 @@ Layout 约定:
 特性:
 - **读 only**:`save_draft` / `publish` 抛 `NotImplementedError`。真要编辑用
   db-backed registry(baizhi-agent / fam-runtime 各自实现)
-- **单租户**:`tenant_id` 参数被忽略;所有 caller 看到同样的 skill 集
+- **租户**:SDK 不带 tenant 概念(spec § 1,2026-05-25 修订);需要 per-tenant
+  skill 集的 application 自己 new 一份 registry / Agent
 - **版本**:每个 skill 目录代表"latest";`load(version=X)` 命中 frontmatter.version
   就 OK,不匹配 / 缺省版本字段(默认 "0.0.0")时给具体 version 直接 KeyError
 - **扫描**:首次 `list` / `load` 触发,后续缓存。`invalidate()` 重新扫
@@ -59,12 +60,12 @@ class FilesystemSkillRegistry(SkillRegistry):
         """清缓存,下次 list / load 重新扫描文件系统。"""
         self._cache = None
 
-    async def list(self, tenant_id: str) -> list[SkillFrontmatter]:
+    async def list(self) -> list[SkillFrontmatter]:
         cache = self._ensure_scanned()
         return [entry.frontmatter for entry in cache.values()]
 
     async def load(
-        self, tenant_id: str, name: str, version: str | None = None
+        self, name: str, version: str | None = None
     ) -> Skill:
         cache = self._ensure_scanned()
         entry = cache.get(name)
@@ -90,14 +91,14 @@ class FilesystemSkillRegistry(SkillRegistry):
         )
 
     async def save_draft(
-        self, tenant_id: str, name: str, md: str, files: dict[str, bytes]
+        self, name: str, md: str, files: dict[str, bytes]
     ) -> None:
         raise NotImplementedError(
             "FilesystemSkillRegistry is read-only; use a db-backed registry "
             "for editable skills."
         )
 
-    async def publish(self, tenant_id: str, name: str) -> str:
+    async def publish(self, name: str) -> str:
         raise NotImplementedError(
             "FilesystemSkillRegistry is read-only; use a db-backed registry "
             "for editable skills."

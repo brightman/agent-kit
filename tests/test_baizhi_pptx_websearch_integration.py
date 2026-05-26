@@ -164,9 +164,7 @@ async def test_agent_loop_uses_baizhi_pptx_skill_and_websearch_mcp(
     tmp_path: Path,
 ) -> None:
     provider = _DeckProvider()
-    skill_catalog = SkillCatalogToolset(
-        FilesystemSkillRegistry(BUNDLED_SKILLS_ROOT), tenant_id="tenant-baizhi"
-    )
+    skill_catalog = SkillCatalogToolset(FilesystemSkillRegistry(BUNDLED_SKILLS_ROOT))
     websearch = _InMemoryMcpToolset(
         _make_websearch_server(),
         McpServerConfig(
@@ -184,7 +182,6 @@ async def test_agent_loop_uses_baizhi_pptx_skill_and_websearch_mcp(
 
     result = await runner.run_to_completion(
         RunRequest(
-            tenant_id="tenant-baizhi",
             agent_id="agent-deck",
             user_message=TASK,
             enabled_skills=["pptx"],

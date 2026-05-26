@@ -19,7 +19,7 @@ from agent_kit.types import Message, ToolCall, ToolResult
 
 def _ctx() -> ToolCallContext:
     return ToolCallContext(
-        tenant_id="t1", run_id="r1", skill_name=None,
+        run_id="r1", skill_name=None,
         cancel=asyncio.Event(), workspace=Path("/tmp"), storage=Path("/tmp"),
         emit=lambda evt: None,
     )

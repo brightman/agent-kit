@@ -87,7 +87,6 @@ class RunRequest:
       拒绝);上面的 _assert_tool_pairs_intact 顺便覆盖
     """
 
-    tenant_id: str
     agent_id: str
     user_message: str
     enabled_skills: list[str] = field(default_factory=list)

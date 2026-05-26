@@ -107,10 +107,10 @@ class _FakeRegistry(SkillRegistry):
             files={}, storage_root=Path("/tmp"),
         )
 
-    async def list(self, tenant_id: str):
+    async def list(self):
         return [s.frontmatter for s in self._skills.values()]
 
-    async def load(self, tenant_id, name, version=None):
+    async def load(self, name, version=None):
         if name not in self._skills:
             raise KeyError(name)
         return self._skills[name]
@@ -131,7 +131,6 @@ class _CancelInBeforeTool(Hook):
 
 def _basic_req(**overrides) -> RunRequest:
     base = dict(
-        tenant_id="t",
         agent_id="a",
         user_message="hi",
         max_rounds=3,
@@ -363,7 +362,7 @@ async def test_skill_catalog_injection(tmp_path: Path) -> None:
     reg.add(SkillFrontmatter(
         name="summarize", description="long-doc summarizer", version="2.0.0",
     ))
-    catalog = SkillCatalogToolset(reg, tenant_id="t")
+    catalog = SkillCatalogToolset(reg)
 
     provider = _ScriptedProvider([LlmResponse(text="ok", tool_calls=[])])
     runner = Runner(provider, toolsets=[catalog], workspace_root=tmp_path / "ws")
@@ -383,7 +382,7 @@ async def test_skill_catalog_injection(tmp_path: Path) -> None:
 async def test_skill_catalog_no_enabled_skills_skips_section(tmp_path: Path) -> None:
     reg = _FakeRegistry()
     reg.add(SkillFrontmatter(name="x", description="d", version="1"))
-    catalog = SkillCatalogToolset(reg, tenant_id="t")
+    catalog = SkillCatalogToolset(reg)
 
     provider = _ScriptedProvider([LlmResponse(text="ok", tool_calls=[])])
     runner = Runner(provider, toolsets=[catalog], workspace_root=tmp_path / "ws")
@@ -415,7 +414,7 @@ async def test_unknown_skill_ref_silently_skipped(tmp_path: Path) -> None:
     """enabled_skills has a name that registry doesn't know → no row for it."""
     reg = _FakeRegistry()
     reg.add(SkillFrontmatter(name="exists", description="e", version="1"))
-    catalog = SkillCatalogToolset(reg, tenant_id="t")
+    catalog = SkillCatalogToolset(reg)
 
     provider = _ScriptedProvider([LlmResponse(text="ok", tool_calls=[])])
     runner = Runner(provider, toolsets=[catalog], workspace_root=tmp_path / "ws")
@@ -433,7 +432,7 @@ async def test_prelude_three_part_compose(tmp_path: Path) -> None:
     """Runner.system_prelude → skill catalog → RunRequest.system_prelude."""
     reg = _FakeRegistry()
     reg.add(SkillFrontmatter(name="s1", description="d1", version="1"))
-    catalog = SkillCatalogToolset(reg, tenant_id="t")
+    catalog = SkillCatalogToolset(reg)
     provider = _ScriptedProvider([LlmResponse(text="ok", tool_calls=[])])
     runner = Runner(
         provider, toolsets=[catalog],
@@ -471,8 +470,8 @@ async def test_multiple_catalogs_picks_first(tmp_path: Path) -> None:
         def build_schemas(self):
             return []
 
-    cat_a = SkillCatalogToolset(reg_a, tenant_id="t")
-    cat_b = _QuietCatalog(reg_b, tenant_id="t")
+    cat_a = SkillCatalogToolset(reg_a)
+    cat_b = _QuietCatalog(reg_b)
     provider = _ScriptedProvider([LlmResponse(text="ok", tool_calls=[])])
     runner = Runner(
         provider, toolsets=[cat_a, cat_b], workspace_root=tmp_path / "ws"
@@ -494,7 +493,7 @@ async def test_enabled_skills_versioned_ref_uses_latest_for_prelude(
     reg = _FakeRegistry()
     reg.add(SkillFrontmatter(name="paper_review", description="latest desc",
                              version="2.0.0"))
-    catalog = SkillCatalogToolset(reg, tenant_id="t")
+    catalog = SkillCatalogToolset(reg)
     provider = _ScriptedProvider([LlmResponse(text="ok", tool_calls=[])])
     runner = Runner(provider, toolsets=[catalog], workspace_root=tmp_path / "ws")
     await runner.run_to_completion(
@@ -515,7 +514,6 @@ async def test_ctx_run_id_matches_workspace(tmp_path: Path) -> None:
         async def before_model(self, ctx, messages, tools):
             captured["run_id"] = ctx.run_id
             captured["workspace"] = ctx.workspace
-            captured["tenant_id"] = ctx.tenant_id
             return None
 
     provider = _ScriptedProvider([LlmResponse(text="ok", tool_calls=[])])
@@ -523,9 +521,8 @@ async def test_ctx_run_id_matches_workspace(tmp_path: Path) -> None:
         provider, toolsets=[], hooks=[_Probe()],
         workspace_root=tmp_path / "ws",
     )
-    await runner.run_to_completion(_basic_req(tenant_id="user_42"))
+    await runner.run_to_completion(_basic_req())
     assert captured["workspace"].name == captured["run_id"]
-    assert captured["tenant_id"] == "user_42"
 
 
 # ---- run_result.events full stream ----
@@ -564,7 +561,7 @@ async def test_workspace_provider_returned_path_used(tmp_path: Path) -> None:
             return None
 
     def provider_fn(req, run_id):
-        seen["provider_called_with"] = (req.tenant_id, req.agent_id, run_id)
+        seen["provider_called_with"] = (req.agent_id, run_id)
         return external
 
     provider = _ScriptedProvider([LlmResponse(text="ok", tool_calls=[])])
@@ -577,8 +574,7 @@ async def test_workspace_provider_returned_path_used(tmp_path: Path) -> None:
 
     assert seen["workspace"] == external
     assert seen["ephemeral"] is False
-    tid, aid, rid = seen["provider_called_with"]
-    assert tid == "t"
+    aid, rid = seen["provider_called_with"]
     assert aid == "a"
     assert rid  # non-empty
 

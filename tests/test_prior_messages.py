@@ -45,7 +45,7 @@ class _ScriptedProvider:
 
 def _ctx() -> ToolCallContext:
     return ToolCallContext(
-        tenant_id="t1", run_id="r1", skill_name=None,
+        run_id="r1", skill_name=None,
         cancel=asyncio.Event(),
         workspace=Path("/tmp"), storage=Path("/tmp"),
         emit=lambda evt: None,
@@ -62,10 +62,10 @@ async def _drain(loop_run):
 
 
 def test_run_request_default_prior_messages_is_empty_list() -> None:
-    req = RunRequest(tenant_id="t", agent_id="a", user_message="hi")
+    req = RunRequest(agent_id="a", user_message="hi")
     assert req.prior_messages == []
     # default_factory:每个 instance 独立 list,不共享
-    req2 = RunRequest(tenant_id="t", agent_id="a", user_message="hi")
+    req2 = RunRequest(agent_id="a", user_message="hi")
     req.prior_messages.append(Message(role="user", content="leak?"))
     assert req2.prior_messages == []
 
@@ -82,7 +82,7 @@ def test_compose_messages_places_prior_messages_between_system_and_user() -> Non
         Message(role="assistant", content="earlier assistant reply"),
     ]
     req = RunRequest(
-        tenant_id="t", agent_id="a", user_message="now",
+        agent_id="a", user_message="now",
         system_prelude="REQUEST PRELUDE",
         prior_messages=prior,
     )
@@ -101,7 +101,7 @@ def test_compose_messages_places_prior_messages_between_system_and_user() -> Non
 def test_compose_messages_with_empty_prior_messages_unchanged_from_pre_prior_behavior() -> None:
     """No prior_messages → 旧行为 [system?, user];本测试 lock 住向后兼容性。"""
     loop = AgentLoop(_ScriptedProvider([]), toolsets=[], system_prelude="P")
-    req = RunRequest(tenant_id="t", agent_id="a", user_message="hi")
+    req = RunRequest(agent_id="a", user_message="hi")
     out = loop._compose_messages(req)
     assert len(out) == 2
     assert out[0].role == "system"
@@ -113,7 +113,7 @@ def test_compose_messages_no_prelude_with_prior_messages_skips_system() -> None:
     不发 system message。"""
     loop = AgentLoop(_ScriptedProvider([]), toolsets=[])
     prior = [Message(role="user", content="earlier")]
-    req = RunRequest(tenant_id="t", agent_id="a", user_message="now", prior_messages=prior)
+    req = RunRequest(agent_id="a", user_message="now", prior_messages=prior)
     out = loop._compose_messages(req)
     assert [m.role for m in out] == ["user", "user"]
     assert out[0].content == "earlier"
@@ -128,7 +128,7 @@ def test_compose_messages_no_prelude_with_prior_messages_skips_system() -> None:
 def test_run_request_rejects_system_role_in_prior_messages() -> None:
     with pytest.raises(ValueError, match="role='system'"):
         RunRequest(
-            tenant_id="t", agent_id="a", user_message="hi",
+            agent_id="a", user_message="hi",
             prior_messages=[
                 Message(role="user", content="ok"),
                 Message(role="system", content="sneaky system"),
@@ -140,7 +140,7 @@ def test_run_request_error_message_points_to_alternative() -> None:
     """ValueError 文案告诉用户 system 内容该塞哪里 —— 避免重复踩。"""
     with pytest.raises(ValueError) as exc_info:
         RunRequest(
-            tenant_id="t", agent_id="a", user_message="hi",
+            agent_id="a", user_message="hi",
             prior_messages=[Message(role="system", content="x")],
         )
     msg = str(exc_info.value)
@@ -155,7 +155,7 @@ def test_run_request_error_message_points_to_alternative() -> None:
 def test_run_request_rejects_orphan_tool_message_without_prior_assistant_call() -> None:
     with pytest.raises(ValueError, match="orphan tool message"):
         RunRequest(
-            tenant_id="t", agent_id="a", user_message="hi",
+            agent_id="a", user_message="hi",
             prior_messages=[
                 Message(role="user", content="search"),
                 Message(role="tool", content="result for nothing", tool_call_id="nope"),
@@ -166,7 +166,7 @@ def test_run_request_rejects_orphan_tool_message_without_prior_assistant_call() 
 def test_run_request_accepts_complete_tool_call_pair_in_prior_messages() -> None:
     """assistant(tool_calls=[X]) + tool(call_id=X) 配对完整 → 接受。"""
     req = RunRequest(
-        tenant_id="t", agent_id="a", user_message="now",
+        agent_id="a", user_message="now",
         prior_messages=[
             Message(role="user", content="search foo"),
             Message(
@@ -197,7 +197,7 @@ async def test_honesty_re_run_shape_loop_sees_prior_assistant_and_continues() ->
     ])
     loop = AgentLoop(provider, toolsets=[])
     req = RunRequest(
-        tenant_id="t", agent_id="a",
+        agent_id="a",
         user_message="Runtime correction: actually use the tool",
         max_rounds=3,
         prior_messages=[
@@ -233,7 +233,7 @@ async def test_multi_turn_history_replay_through_prior_messages() -> None:
         Message(role="assistant", content="turn 3 assistant"),
     ]
     req = RunRequest(
-        tenant_id="t", agent_id="a",
+        agent_id="a",
         user_message="turn 4 user",
         max_rounds=3,
         prior_messages=prior,

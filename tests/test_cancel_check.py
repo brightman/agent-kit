@@ -68,7 +68,7 @@ class _ScriptedToolset(BaseToolset):
 
 def _ctx(cancel: asyncio.Event | None = None) -> ToolCallContext:
     return ToolCallContext(
-        tenant_id="t1", run_id="r1", skill_name=None,
+        run_id="r1", skill_name=None,
         cancel=cancel or asyncio.Event(),
         workspace=Path("/tmp"), storage=Path("/tmp"),
         emit=lambda evt: None,
@@ -92,7 +92,7 @@ async def test_default_cancel_check_none_does_not_trigger_cancel() -> None:
     """Default cancel_check=None → 永不 cancel,normal completion。"""
     provider = _ScriptedProvider([LlmResponse(text="ok", tool_calls=[])])
     loop = AgentLoop(provider, toolsets=[])
-    req = RunRequest(tenant_id="t", agent_id="a", user_message="hi", max_rounds=3)
+    req = RunRequest(agent_id="a", user_message="hi", max_rounds=3)
     events = await _drain(loop.run(req, _ctx()))
     assert "cancelled" not in _kinds(events)
     assert "final_text" in _kinds(events)
@@ -112,7 +112,7 @@ async def test_cancel_check_returning_false_does_not_trigger_cancel() -> None:
     ])
     loop = AgentLoop(provider, toolsets=[_ScriptedToolset()])
     req = RunRequest(
-        tenant_id="t", agent_id="a", user_message="hi", max_rounds=3,
+        agent_id="a", user_message="hi", max_rounds=3,
         cancel_check=never_cancel,
     )
     events = await _drain(loop.run(req, _ctx()))
@@ -131,7 +131,7 @@ async def test_cancel_check_true_before_first_round_emits_cancelled_no_provider_
     provider = _ScriptedProvider([LlmResponse(text="never runs", tool_calls=[])])
     loop = AgentLoop(provider, toolsets=[])
     req = RunRequest(
-        tenant_id="t", agent_id="a", user_message="hi", max_rounds=3,
+        agent_id="a", user_message="hi", max_rounds=3,
         cancel_check=lambda: True,
     )
     events = await _drain(loop.run(req, _ctx()))
@@ -163,7 +163,7 @@ async def test_cancel_check_true_after_first_round_completes_then_cancels() -> N
     tools = _ScriptedToolset()
     loop = AgentLoop(provider, toolsets=[tools])
     req = RunRequest(
-        tenant_id="t", agent_id="a", user_message="hi", max_rounds=5,
+        agent_id="a", user_message="hi", max_rounds=5,
         cancel_check=maybe_cancel,
     )
 
@@ -178,7 +178,7 @@ async def test_cancel_check_true_after_first_round_completes_then_cancels() -> N
         return poll_count["n"] >= 3
 
     req2 = RunRequest(
-        tenant_id="t", agent_id="a", user_message="hi", max_rounds=5,
+        agent_id="a", user_message="hi", max_rounds=5,
         cancel_check=cancel_on_round_2,
     )
     events = await _drain(loop.run(req2, _ctx()))
@@ -216,7 +216,7 @@ async def test_cancel_check_true_before_tool_dispatch_emits_mid_tool_reason() ->
     tools = _ScriptedToolset()
     loop = AgentLoop(provider, toolsets=[tools])
     req = RunRequest(
-        tenant_id="t", agent_id="a", user_message="hi", max_rounds=3,
+        agent_id="a", user_message="hi", max_rounds=3,
         cancel_check=cancel_after_llm,
     )
     events = await _drain(loop.run(req, _ctx()))
@@ -243,7 +243,7 @@ async def test_cancel_check_raising_exception_is_swallowed_run_continues(caplog)
     provider = _ScriptedProvider([LlmResponse(text="ok", tool_calls=[])])
     loop = AgentLoop(provider, toolsets=[])
     req = RunRequest(
-        tenant_id="t", agent_id="a", user_message="hi", max_rounds=3,
+        agent_id="a", user_message="hi", max_rounds=3,
         cancel_check=boom,
     )
     with caplog.at_level(logging.WARNING, logger="agent_kit.loop"):
@@ -268,7 +268,7 @@ async def test_ctx_cancel_set_takes_precedence_over_cancel_check_in_reason() -> 
     cancel_event = asyncio.Event()
     cancel_event.set()  # ctx.cancel 已经 set 了
     req = RunRequest(
-        tenant_id="t", agent_id="a", user_message="hi", max_rounds=3,
+        agent_id="a", user_message="hi", max_rounds=3,
         cancel_check=lambda: True,  # cancel_check 也想 cancel
     )
     events = await _drain(loop.run(req, _ctx(cancel=cancel_event)))
@@ -284,7 +284,7 @@ async def test_ctx_cancel_alone_still_works_unchanged_from_before() -> None:
     cancel_event = asyncio.Event()
     cancel_event.set()
     req = RunRequest(
-        tenant_id="t", agent_id="a", user_message="hi", max_rounds=3,
+        agent_id="a", user_message="hi", max_rounds=3,
         # cancel_check 默认 None
     )
     events = await _drain(loop.run(req, _ctx(cancel=cancel_event)))
@@ -320,7 +320,7 @@ async def test_cancel_event_reason_vocab_is_one_of_four_known_values() -> None:
         if ctx_set:
             cancel_evt.set()
         req = RunRequest(
-            tenant_id="t", agent_id="a", user_message="hi", max_rounds=3,
+            agent_id="a", user_message="hi", max_rounds=3,
             cancel_check=cc,
         )
         events = await _drain(loop.run(req, _ctx(cancel=cancel_evt)))

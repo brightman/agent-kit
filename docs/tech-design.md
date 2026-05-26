@@ -43,6 +43,12 @@
 ### 非目标(本文档**不**定义,留给上层)
 
 - 多租户队列 / LRU / 资源调度
+- **tenant 概念**(2026-05-25 修订):SDK 完全 tenant-agnostic。`RunRequest` /
+  `ToolCallContext` / `SkillRegistry` / `Agent` 都不带 `tenant_id` 字段或参数。
+  多租户 application 层每个 tenant **new 一份** `Agent` + per-tenant
+  `SkillRegistry` / `workspace_provider` closure;tenant 标识若要传到 hook /
+  toolset 内部,通过 `RunRequest.metadata` dict 自由载荷。决策依据:tenant
+  是 deployment shape 而不是 SDK 机制(同 § 7.2 撤掉 McpLifecycle 的逻辑)
 - 持久化(SQLite / OTel exporter)
 - HTTP API
 - 鉴权 / 配额
@@ -219,7 +225,9 @@ class Event:
 ```python
 @dataclass
 class RunRequest:
-    tenant_id: str               # MUST 非空
+    # `tenant_id` 已删除(2026-05-25 修订);SDK 自身不带 tenant 概念。
+    # 多租户应用层每个 tenant new 一份 Agent / Runner;tenant 可通过
+    # `metadata` dict 传到 hook / toolset 供 application 使用
     agent_id: str                # MUST 非空
     user_message: str
     enabled_skills: list[str] = field(default_factory=list)
@@ -486,7 +494,7 @@ class BaseToolset(ABC):
 ```python
 @dataclass
 class ToolCallContext:
-    tenant_id: str
+    # `tenant_id` 已删除(2026-05-25 修订);见 § 3.7 RunRequest
     run_id: str
     skill_name: str | None        # 当前调用所归属的 skill(若工具调用来自 SKILL.md 描述触发)
     cancel: asyncio.Event         # toolset 长任务 SHOULD 周期性 check
@@ -658,23 +666,26 @@ def parse_frontmatter(md: str) -> tuple[SkillFrontmatter, str]:
 
 ```python
 class SkillRegistry(ABC):
-    @abstractmethod
-    async def list(self, tenant_id: str) -> list[SkillFrontmatter]: ...
+    # 2026-05-25 修订:所有方法删除 `tenant_id` 参数。SDK 不带 tenant
+    # 概念;每个 Registry 实例**已经是** pre-scoped 的(application 层每
+    # tenant new 一份 registry,通过 closure / instance 绑定)。
 
     @abstractmethod
-    async def load(self, tenant_id: str, name: str, version: str | None = None) -> Skill:
+    async def list(self) -> list[SkillFrontmatter]: ...
+
+    @abstractmethod
+    async def load(self, name: str, version: str | None = None) -> Skill:
         """Q2 决议:version=None 拿 latest;具体值拿 immutable publish。
-        - tenant_id 不存在 → raise KeyError
         - name 不存在 → raise KeyError
         - version 给了但不存在 → raise KeyError"""
 
     @abstractmethod
     async def save_draft(
-        self, tenant_id: str, name: str, md: str, files: dict[str, bytes]
+        self, name: str, md: str, files: dict[str, bytes]
     ) -> None: ...
 
     @abstractmethod
-    async def publish(self, tenant_id: str, name: str) -> str:
+    async def publish(self, name: str) -> str:
         """draft → immutable version,返回新版本号。
         - 无 draft → raise FileNotFoundError"""
 ```

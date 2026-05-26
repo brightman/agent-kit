@@ -51,25 +51,36 @@ class Skill:
 
 
 class SkillRegistry(ABC):
-    """skill 持久层的统一接口。baizhi-agent / fam-runtime 各自实现。"""
+    """skill 持久层的统一接口。baizhi-agent / fam-runtime 各自实现。
+
+    **租户**:SDK **不**带 tenant 概念(spec § 1 决议,2026-05-25 修订)。
+    需要多租户的应用层(baizhi)实现自己的 db-backed registry,通过 closure /
+    instance-per-tenant 的方式把 tenant 绑死在 Registry 实例上 —— 例如:
+
+        def make_registry_for(tenant_id):
+            return _TenantScopedSkillRegistry(baizhi_db, tenant_id=tenant_id)
+
+    上层 application 再 `Agent(skills=make_registry_for(tenant))` 给每个
+    tenant 一份 Agent(spec § 17.6 模式)。
+    """
 
     @abstractmethod
-    async def list(self, tenant_id: str) -> list[SkillFrontmatter]: ...
+    async def list(self) -> list[SkillFrontmatter]: ...
 
     @abstractmethod
     async def load(
-        self, tenant_id: str, name: str, version: str | None = None
+        self, name: str, version: str | None = None
     ) -> Skill:
         """Q2 决议:version=None 拿 latest;给具体值拿 immutable publish。
         不存在 → raise KeyError。"""
 
     @abstractmethod
     async def save_draft(
-        self, tenant_id: str, name: str, md: str, files: dict[str, bytes]
+        self, name: str, md: str, files: dict[str, bytes]
     ) -> None: ...
 
     @abstractmethod
-    async def publish(self, tenant_id: str, name: str) -> str:
+    async def publish(self, name: str) -> str:
         """publish draft → immutable version,返回新版本号。
         无 draft → raise FileNotFoundError。"""
 
@@ -164,20 +175,22 @@ class SkillCatalogToolset(BaseToolset):
 
     Progressive disclosure 的运行时实现:enabled skills 的 frontmatter 已经
     在 system prompt 里给了 LLM(loop 负责);LLM 想看 body 调 load_skill。
+
+    **租户**:SDK 不带 tenant 概念(spec § 1)。Registry 实例本身就**已经**
+    是 pre-scoped 的(application 层每个 tenant new 一份 registry)。
     """
 
     name = "skill_catalog"
 
-    def __init__(self, registry: SkillRegistry, tenant_id: str) -> None:
+    def __init__(self, registry: SkillRegistry) -> None:
         self._registry = registry
-        self._tenant_id = tenant_id
 
     def build_schemas(self) -> list[ToolSchema]:
         return [
             ToolSchema(
                 name=_TOOL_LIST_SKILLS,
                 description=(
-                    "List all skills available to this tenant. Returns JSON array of "
+                    "List all skills available to the agent. Returns JSON array of "
                     "{name, description, version}."
                 ),
                 parameters={"type": "object", "properties": {}, "additionalProperties": False},
@@ -243,7 +256,7 @@ class SkillCatalogToolset(BaseToolset):
             )
 
     async def _list_skills(self, call: ToolCall) -> ToolResult:
-        items = await self._registry.list(self._tenant_id)
+        items = await self._registry.list()
         payload = [
             {"name": fm.name, "description": fm.description, "version": fm.version}
             for fm in items
@@ -255,7 +268,7 @@ class SkillCatalogToolset(BaseToolset):
         if "name" not in args:
             return ToolResult(call_id=call.id, content="ERROR: missing 'name' argument", is_error=True)
         skill = await self._registry.load(
-            self._tenant_id, str(args["name"]), version=args.get("version")
+            str(args["name"]), version=args.get("version")
         )
         return ToolResult(call_id=call.id, content=skill.body)
 
@@ -269,7 +282,7 @@ class SkillCatalogToolset(BaseToolset):
                     is_error=True,
                 )
         skill = await self._registry.load(
-            self._tenant_id, str(args["name"]), version=args.get("version")
+            str(args["name"]), version=args.get("version")
         )
         path = str(args["path"])
         data = skill.files.get(path)

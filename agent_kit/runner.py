@@ -10,7 +10,7 @@
   触发 toolset 资源释放(详见 § 9.3)
 - **skill catalog 来自 discovery**:Runner 不收 `skill_registry` 参数;
   而是在 toolsets 列表里 isinstance 找 `SkillCatalogToolset`,从中读
-  registry+tenant_id 去构造 prelude 段(§ 10.1)
+  registry 去构造 prelude 段(§ 10.1)
 - **workspace 生命周期**:run_id 启动时分配,workspace = workspace_root / run_id;
   mkdir 在 run 开头,finally 删
 - **错误传播 Q4 双轨**:`run` yield error event 后 return;
@@ -24,12 +24,12 @@
     runner = Runner(
         provider=LiteLlmProvider("minimax/MiniMax-M2.7"),
         toolsets=[
-            SkillCatalogToolset(skill_registry, tenant_id="user_42"),
+            SkillCatalogToolset(skill_registry),
             *toolsets_from_configs([...]),
         ],
     )
     # 流式:
-    async for evt in runner.run(RunRequest(tenant_id="user_42", ...)):
+    async for evt in runner.run(RunRequest(agent_id="researcher", user_message="...")):
         print(evt.kind, evt.payload)
     # 聚合:
     result = await runner.run_to_completion(RunRequest(...))
@@ -125,7 +125,7 @@ async def _build_skill_section(
     if not enabled_refs:
         return ""
     wanted_names = {parse_skill_ref(ref)[0] for ref in enabled_refs}
-    all_fms: list[SkillFrontmatter] = await catalog._registry.list(catalog._tenant_id)
+    all_fms: list[SkillFrontmatter] = await catalog._registry.list()
     matched = [fm for fm in all_fms if fm.name in wanted_names]
     if not matched:
         return ""
@@ -166,7 +166,9 @@ class Runner:
 
         典型用法:把 baizhi-agent 的 tenant_agent 持久空间映射进 SDK
             def baizhi_workspace(req, run_id):
-                p = Path(f"/data/baizhi/{req.tenant_id}/agents/{req.agent_id}")
+                # tenant 在 baizhi application 层通过 closure 或自家 metadata 取
+                # SDK 自己不带 tenant 概念(spec § 1)
+                p = Path(f"/data/baizhi/{this_tenant_id}/agents/{req.agent_id}")
                 p.mkdir(parents=True, exist_ok=True)
                 return p
 
@@ -217,7 +219,6 @@ class Runner:
                     hooks=self._hooks,
                 )
                 ctx = ToolCallContext(
-                    tenant_id=request.tenant_id,
                     run_id=run_id,
                     skill_name=None,
                     cancel=asyncio.Event(),

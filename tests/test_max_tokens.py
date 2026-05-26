@@ -53,7 +53,7 @@ class _OneTool(BaseToolset):
 
 def _ctx() -> ToolCallContext:
     return ToolCallContext(
-        tenant_id="t", run_id="r", skill_name=None,
+        run_id="r", skill_name=None,
         cancel=asyncio.Event(),
         workspace=Path("/tmp"), storage=Path("/tmp"),
         emit=lambda evt: None,
@@ -67,7 +67,7 @@ async def _drain(loop_run):
 async def test_default_max_tokens_none_passed_through_as_none() -> None:
     provider = _RecordingProvider([LlmResponse(text="ok", tool_calls=[])])
     loop = AgentLoop(provider, toolsets=[])
-    req = RunRequest(tenant_id="t", agent_id="a", user_message="hi", max_rounds=3)
+    req = RunRequest(agent_id="a", user_message="hi", max_rounds=3)
     await _drain(loop.run(req, _ctx()))
     assert len(provider.calls) == 1
     assert provider.calls[0]["max_tokens"] is None
@@ -77,7 +77,7 @@ async def test_explicit_max_tokens_512_passed_through_to_provider() -> None:
     provider = _RecordingProvider([LlmResponse(text="ok", tool_calls=[])])
     loop = AgentLoop(provider, toolsets=[])
     req = RunRequest(
-        tenant_id="t", agent_id="a", user_message="hi",
+        agent_id="a", user_message="hi",
         max_rounds=3, max_tokens=512,
     )
     await _drain(loop.run(req, _ctx()))
@@ -93,7 +93,7 @@ async def test_max_tokens_passed_every_round_not_just_first() -> None:
     ])
     loop = AgentLoop(provider, toolsets=[_OneTool()])
     req = RunRequest(
-        tenant_id="t", agent_id="a", user_message="hi",
+        agent_id="a", user_message="hi",
         max_rounds=3, max_tokens=200,
     )
     await _drain(loop.run(req, _ctx()))
@@ -108,7 +108,7 @@ async def test_max_tokens_zero_is_valid_int_passed_through() -> None:
     provider = _RecordingProvider([LlmResponse(text="ok", tool_calls=[])])
     loop = AgentLoop(provider, toolsets=[])
     req = RunRequest(
-        tenant_id="t", agent_id="a", user_message="hi",
+        agent_id="a", user_message="hi",
         max_rounds=3, max_tokens=0,
     )
     await _drain(loop.run(req, _ctx()))

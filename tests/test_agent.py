@@ -155,40 +155,6 @@ def test_run_overrides_per_call() -> None:
     assert provider.calls[0]["max_tokens"] == 42
 
 
-def test_tenant_id_default_when_not_specified() -> None:
-    provider = _StubProvider()
-    a = Agent(name="x", model=provider)
-
-    seen_ctx_tenant: dict[str, Any] = {}
-
-    from agent_kit import Hook
-
-    class _CaptureCtx(Hook):
-        async def before_model(self, ctx, messages, tools):
-            seen_ctx_tenant["tenant"] = ctx.tenant_id
-            return None
-
-    a2 = Agent(name="x", model=provider, hooks=[_CaptureCtx()])
-    a2.run_sync("hi")
-    assert seen_ctx_tenant["tenant"] == "default"
-
-
-def test_tenant_id_explicit_passed_through() -> None:
-    provider = _StubProvider()
-    seen: dict[str, Any] = {}
-
-    from agent_kit import Hook
-
-    class _Cap(Hook):
-        async def before_model(self, ctx, messages, tools):
-            seen["tenant"] = ctx.tenant_id
-            return None
-
-    a = Agent(name="x", model=provider, hooks=[_Cap()])
-    a.run_sync("hi", tenant_id="user_42")
-    assert seen["tenant"] == "user_42"
-
-
 def test_agent_id_in_request_matches_agent_name() -> None:
     provider = _StubProvider()
     seen: dict[str, Any] = {}
@@ -218,7 +184,6 @@ def test_run_request_builder_carries_all_fields() -> None:
               default_max_rounds=8, default_temperature=0.5, default_max_tokens=100)
     req = a._build_request(
         "the question",
-        tenant_id="user_7",
         enabled_skills=["pptx"],
         max_rounds=None,        # use default
         temperature=None,
@@ -227,7 +192,6 @@ def test_run_request_builder_carries_all_fields() -> None:
         cancel_check=None,
         metadata={"k": "v"},
     )
-    assert req.tenant_id == "user_7"
     assert req.agent_id == "my-agent"
     assert req.user_message == "the question"
     assert req.enabled_skills == ["pptx"]
@@ -300,7 +264,7 @@ def test_runner_property_exposes_full_api() -> None:
     """Advanced users can drop down to Runner for `run_to_completion(RunRequest(...))`."""
     a = Agent(name="x", model=_StubProvider())
     result = a.runner.run_sync(
-        RunRequest(tenant_id="t", agent_id="x", user_message="hi"),
+        RunRequest(agent_id="x", user_message="hi"),
     )
     assert result.final_text == "default reply"
 

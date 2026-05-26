@@ -42,7 +42,6 @@ class ToolCallContext:
       Runner 不动它,toolset 可以放心物化 + 缓存(例如 skill files)
     """
 
-    tenant_id: str
     run_id: str
     skill_name: str | None
     cancel: asyncio.Event
