@@ -37,3 +37,7 @@ htmlcov/
 
 # E2E test artifacts(生成的 pptx / 图片 / 等)
 e2e-output/
+
+# Agent / session-local docs —— 每个 contributor 自己维护,不入仓
+CLAUDE.md
+HANDOFF.md
