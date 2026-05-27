@@ -443,6 +443,9 @@ backend that does.
 See [`samples/coding-agent/`](../samples/coding-agent) for an end-to-end
 "fix a real Python bug" demo using `LocalDirRunner` + a scripted LLM.
 
+For testing recipes (smoke against real `srt`, in-process MCP, live agent
+swap, troubleshooting) see [docs/sandbox.md](sandbox.md).
+
 ---
 
 ## 9. Streaming events

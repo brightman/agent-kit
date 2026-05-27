@@ -71,6 +71,9 @@ agent_kit/
 - **[docs/tech-design.md](docs/tech-design.md)** — full spec, RFC-style.
   Read this if you're implementing an alternative `LlmProvider` /
   `SkillRegistry` / `Hook` / `SandboxRunner`.
+- **[docs/sandbox.md](docs/sandbox.md)** — testing recipes for the three
+  sandbox backends (LocalDir / SRT / MCP): unit tests, in-process smoke,
+  real-binary smoke, live-agent integration, troubleshooting.
 - **[samples/](samples/)** — runnable demos:
   - [`agent-skills-tutorial`](samples/agent-skills-tutorial) — agent-kit port
     of Google ADK's skills demo. Inline / file-based / external / meta skills.
