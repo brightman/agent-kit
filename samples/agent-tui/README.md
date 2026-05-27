@@ -3,17 +3,20 @@
 A two-pane terminal UI that drives an `agent_kit.Agent` and **renders every
 event live** as the agent thinks, calls tools, and replies.
 
-The pre-wired agent has three real pieces:
+The pre-wired agent has four real pieces:
 
 | Piece | Provider |
 |---|---|
 | **LLM** | **Qwen3.6-Plus** via DashScope's OpenAI-compatible endpoint (LiteLLM `openai/qwen3.6-plus` + custom `api_base`); reasoning / thinking mode opt-in via env |
 | **`skill-creator`** skill | Anthropic's official [skill-creator](https://github.com/anthropics/skills/tree/main/skills/skill-creator) (vendored under `app/skills/`) |
 | **WebSearch** MCP | Aliyun Bailian (`https://dashscope.aliyuncs.com/.../WebSearch/mcp`), streamable HTTP |
+| **Sandbox** | `SandboxToolset(LocalDirRunner)` over a **persistent workspace** (`~/.agent-tui-workspace` by default). Exposes `exec_command` / `read_file` / `write_file` to the LLM with a tight command allowlist |
 
-All three are powered by a **single `DASHSCOPE_API_KEY`**. So you can ask
-the agent to *"search the web for X"* OR *"help me design a new SKILL.md
-for Y"* — and watch the loop in real time.
+`DASHSCOPE_API_KEY` powers the LLM + the WebSearch MCP. The sandbox runs
+on your local machine (no key needed). So you can ask the agent to
+*"search the web for X"*, *"help me design a new SKILL.md for Y and save
+it to disk"*, or *"validate the SKILL.md you wrote yesterday"* — and watch
+the loop in real time.
 
 ## Layout
 
@@ -95,8 +98,10 @@ exercise both tools:
 | Prompt | What you'll see |
 |---|---|
 | `Search for the latest Python 3.13 release date` | `tool_call mcp__websearch__search(...)` → `tool_result` → final text with citations |
-| `Help me write a SKILL.md for reviewing Python code` | `tool_call load_skill(name="skill-creator")` → `tool_call load_skill_resource(path="references/schemas.md")` → final draft |
-| `Search for "context engineering" and then make a skill for it` | Both: websearch first, then skill-creator |
+| `Help me write a SKILL.md for reviewing Python code, save it to my workspace` | `load_skill(name="skill-creator")` → `load_skill_resource(path="references/schemas.md")` → `sandbox__localdir__write_file(path="code-review/SKILL.md", …)` → final summary |
+| `List my workspace files, then cat the most recent SKILL.md` | `sandbox__localdir__exec_command(cmd=["ls"])` → `sandbox__localdir__exec_command(cmd=["cat", "<file>"])` |
+| `Validate the code-review skill using skill-creator's quick_validate.py` | `sandbox__localdir__exec_command(cmd=["python", "/path/to/skill-creator/scripts/quick_validate.py", "code-review"])` → output piped through |
+| `Search for "context engineering" and then make a skill for it on disk` | WebSearch → skill-creator → sandbox write_file (all in one run) |
 
 ## File layout
 
@@ -107,9 +112,9 @@ samples/agent-tui/
 ├── .env.example
 └── app/
     ├── __init__.py
-    ├── agent.py         build_agent(): LiteLlm + skill-creator + WebSearch MCP
+    ├── agent.py         build_agent(): LiteLlm + skill-creator + WebSearch MCP + Sandbox
     ├── tui.py           Textual app + live event renderer
-    ├── test_app.py      10 offline tests (no LLM key needed)
+    ├── test_app.py      18 offline tests (no LLM key needed)
     └── skills/
         └── skill-creator/   ← vendored from anthropics/skills
             ├── SKILL.md
@@ -159,6 +164,32 @@ These verify:
   for every event kind (round_start / llm_response / tool_call / tool_result
   / error / etc.)
 
+## Persistent workspace
+
+The sandbox toolset operates on a persistent dir that survives across runs
+(and across `Ctrl-C` restarts of the TUI):
+
+```bash
+# Default location
+~/.agent-tui-workspace/
+
+# Override via env (path is mkdir'd at startup if missing)
+export AGENT_TUI_WORKSPACE=/some/where/else
+```
+
+Inside the workspace, the LLM uses **workspace-relative paths**. The
+LocalDirRunner blocks any path that resolves outside it (`PermissionError:
+escapes workspace`), so `../../etc/passwd` is impossible.
+
+Command allowlist (anything not in the list returns `exit_code=126`):
+
+```
+ls cat head tail wc grep rg find tree python python3
+```
+
+Edit `app/agent.py::_SANDBOX_ALLOWLIST` to widen / narrow. **Notably
+absent**: `rm`, `mv`, `chmod`, `bash -c …`, network tools (`curl`, `wget`).
+
 ## Customizing
 
 - **Different Qwen variant** — `export QWEN_MODEL=qwen-max` (or `qwen-turbo`,
@@ -170,6 +201,11 @@ These verify:
   no-args path
 - **Different MCP server** — edit `app/agent.py::_build_websearch_mcp` or
   add another `McpToolset.http(...)` / `.stdio(...)` to the `tools=` list
+- **Different sandbox backend** — swap `LocalDirRunner` for `SrtRunner`
+  (Anthropic sandbox-runtime, real isolation) or `McpSandboxRunner` (any
+  E2B/Modal/Daytona MCP) in `app/agent.py::_build_sandbox_toolset`. The
+  3 LLM tool names stay the same — no INSTRUCTION rewrite needed
+- **More / fewer allowed commands** — edit `_SANDBOX_ALLOWLIST`
 - **More skills** — drop another `<skill-name>/SKILL.md` (+ optional
   references/scripts) under `app/skills/`. The `FilesystemSkillRegistry`
   picks them all up automatically; no code changes

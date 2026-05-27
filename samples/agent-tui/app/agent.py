@@ -5,8 +5,12 @@ Wires:
 - **Anthropic skill-creator** skill, loaded from `app/skills/`
 - **Aliyun Bailian WebSearch** MCP toolset (streamable HTTP, env-substituted
   Authorization header)
+- **Sandbox** (LocalDirRunner) — read/write files + exec shell commands in a
+  **persistent workspace** at `~/.agent-tui-workspace` (override via
+  `AGENT_TUI_WORKSPACE`). Lets skill-creator actually save generated
+  SKILL.md files and run its built-in validation scripts.
 
-Single `DASHSCOPE_API_KEY` powers BOTH the LLM and the WebSearch MCP.
+Single `DASHSCOPE_API_KEY` powers the LLM AND the WebSearch MCP.
 """
 
 from __future__ import annotations
@@ -17,26 +21,49 @@ from typing import Any
 
 from agent_kit import Agent, McpToolset
 from agent_kit.contrib.providers.litellm import LiteLlm
+from agent_kit.contrib.sandbox import SandboxToolset
+from agent_kit.contrib.sandbox.runners import LocalDirRunner
 from agent_kit.provider import LlmProvider
 
 _HERE = Path(__file__).parent
 
 _DASHSCOPE_OPENAI_BASE = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 
+# Persistent workspace default: ~/.agent-tui-workspace. Override via env.
+_DEFAULT_WORKSPACE = Path.home() / ".agent-tui-workspace"
 
-INSTRUCTION = (
+# Sandbox command allowlist — exploration + Python + safe shell utilities.
+# Notably absent: `rm`, `mv`, `chmod`, `curl`, `bash -c …` (allowlist is by
+# binary name, so `bash -c` is blocked because `bash` isn't listed).
+_SANDBOX_ALLOWLIST = [
+    "ls", "cat", "head", "tail", "wc",   # read / inspect
+    "grep", "rg", "find", "tree",        # search / explore
+    "python", "python3",                  # run scripts (esp. skill-creator's)
+]
+
+
+INSTRUCTION_TMPL = (
     "You are a research + skill-creation assistant.\n\n"
-    "You have two capabilities:\n"
+    "You have THREE capability groups:\n"
     "1. **WebSearch** (MCP) — real-time web search via Aliyun Bailian.\n"
-    "   Use `mcp__websearch__*` tools when the user asks a factual /\n"
-    "   time-sensitive question or wants links / citations.\n"
+    "   Use `mcp__websearch__*` tools for factual / time-sensitive questions\n"
+    "   or when the user wants links / citations.\n"
     "2. **skill-creator** (skill) — the official Anthropic skill for\n"
     "   designing new SKILL.md files. Use `load_skill(\"skill-creator\")`\n"
-    "   when the user wants to create / refine / evaluate a skill.\n\n"
+    "   when the user wants to create / refine / evaluate a skill.\n"
+    "3. **Sandbox** (file + exec) — `sandbox__localdir__*` tools to\n"
+    "   read / write files and run shell commands in your **persistent\n"
+    "   workspace** at `{workspace}`. Workspace files survive across runs.\n"
+    "   Allowed commands: {allowlist}.\n\n"
     "Workflow rules:\n"
     "- For search tasks: search first, cite URLs, summarize in 3-5 bullets.\n"
-    "- For skill tasks: load the skill, then use `load_skill_resource` to\n"
-    "  read schemas + agent definitions before drafting.\n"
+    "- For skill tasks: load skill-creator, read its schemas + agent\n"
+    "  references, then *write* the drafted SKILL.md to disk via\n"
+    "  `sandbox__localdir__write_file` so the user can inspect / iterate.\n"
+    "  Use `sandbox__localdir__exec_command` with `python` to run\n"
+    "  skill-creator's validation scripts (e.g.\n"
+    "  `quick_validate.py <skill-dir>`) when the user asks to verify.\n"
+    "- Use relative paths (workspace-rooted). Path-traversal is blocked.\n"
     "- Always announce briefly which tool / skill you're about to use.\n"
 )
 
@@ -48,14 +75,41 @@ def build_agent(model: LlmProvider | str | None = None) -> Agent:
     DashScope's OpenAI-compatible endpoint. Pass a string (LiteLLM model id)
     or your own `LlmProvider` to override.
     """
+    workspace_path = _resolve_workspace_path()
+    workspace_path.mkdir(parents=True, exist_ok=True)
+
+    instruction = INSTRUCTION_TMPL.format(
+        workspace=workspace_path,
+        allowlist=", ".join(_SANDBOX_ALLOWLIST),
+    )
+
     return Agent(
         name="research-assistant",
         model=model if model is not None else _build_qwen_llm(),
-        instruction=INSTRUCTION,
+        instruction=instruction,
         skills=_HERE / "skills",       # → FilesystemSkillRegistry
-        tools=[_build_websearch_mcp()],
+        tools=[
+            _build_websearch_mcp(),
+            _build_sandbox_toolset(),
+        ],
+        # Callable → persistent workspace, ctx.workspace_ephemeral=False.
+        # Every run sees the same dir; toolsets can cache files across runs.
+        workspace=lambda _req, _run_id: workspace_path,
         default_max_rounds=12,
     )
+
+
+def _resolve_workspace_path() -> Path:
+    """Pick the persistent workspace directory.
+
+    Order:
+    1. `$AGENT_TUI_WORKSPACE` env (absolute or relative, expanded)
+    2. `~/.agent-tui-workspace` (default)
+    """
+    env = os.environ.get("AGENT_TUI_WORKSPACE")
+    if env:
+        return Path(env).expanduser().resolve()
+    return _DEFAULT_WORKSPACE
 
 
 def _build_qwen_llm() -> LiteLlm:
@@ -115,3 +169,16 @@ def _build_websearch_mcp() -> McpToolset:
         headers={"Authorization": "Bearer ${DASHSCOPE_API_KEY}"},
         # ${VAR} is filled from os.environ at construction time (see spec § 7).
     )
+
+
+def _build_sandbox_toolset() -> SandboxToolset:
+    """LocalDirRunner-backed sandbox: 3 tools (`exec_command`, `read_file`,
+    `write_file`) operating on the persistent workspace dir.
+
+    NO OS-level isolation — runs as the host user. Allowlist + path-traversal
+    defense are the only guardrails. Trust your LLM accordingly.
+    """
+    return SandboxToolset(LocalDirRunner(
+        command_allowlist=_SANDBOX_ALLOWLIST,
+        env_passthrough=("PATH", "HOME"),
+    ))

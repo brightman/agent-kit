@@ -30,17 +30,17 @@ class _StubProvider:
     async def chat_stream(self, *a, **k): raise NotImplementedError
 
 
-def test_agent_builds_with_skill_and_mcp(monkeypatch) -> None:
+def test_agent_builds_with_skill_mcp_and_sandbox(monkeypatch, tmp_path) -> None:
     """build_agent() returns a working Agent with skill-creator + websearch
-    MCP wired in. We use a stub provider so no key is needed.
+    MCP + sandbox toolset wired in. Stub provider, no LLM key needed.
     """
     monkeypatch.setenv("DASHSCOPE_API_KEY", "test-key-not-real")
+    monkeypatch.setenv("AGENT_TUI_WORKSPACE", str(tmp_path / "ws"))
     agent = build_agent(model=_StubProvider())
-    # tools list should include the McpToolset (websearch) AND the
-    # SkillCatalogToolset (auto-added by Agent from skills=...)
     tool_names = {t.name for t in agent.runner._toolsets}
-    assert "mcp__websearch" in tool_names
-    assert "skill_catalog" in tool_names
+    assert "mcp__websearch" in tool_names       # WebSearch MCP
+    assert "skill_catalog" in tool_names         # auto-added from skills=
+    assert "sandbox__localdir" in tool_names    # NEW: file/exec sandbox
 
 
 def test_skill_creator_is_discoverable(monkeypatch) -> None:
@@ -107,6 +107,56 @@ def test_qwen_model_override(monkeypatch) -> None:
     monkeypatch.setenv("QWEN_MODEL", "qwen-turbo")
     agent = build_agent()
     assert agent.model.model == "openai/qwen-turbo"
+
+
+def test_sandbox_toolset_exposes_three_llm_tools(monkeypatch, tmp_path) -> None:
+    """SandboxToolset advertises exec_command / read_file / write_file."""
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "sk-fake")
+    monkeypatch.setenv("AGENT_TUI_WORKSPACE", str(tmp_path / "ws"))
+    agent = build_agent(model=_StubProvider())
+    sb = next(t for t in agent.runner._toolsets if t.name == "sandbox__localdir")
+    schema_names = {s.name for s in sb.build_schemas()}
+    assert schema_names == {
+        "sandbox__localdir__exec_command",
+        "sandbox__localdir__read_file",
+        "sandbox__localdir__write_file",
+    }
+
+
+def test_workspace_is_persistent_callable(monkeypatch, tmp_path) -> None:
+    """`Agent(workspace=callable)` → ctx.workspace_ephemeral=False so
+    files survive across runs."""
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "sk-fake")
+    monkeypatch.setenv("AGENT_TUI_WORKSPACE", str(tmp_path / "ws"))
+    agent = build_agent(model=_StubProvider())
+    # Runner stored a callable, not a Path → persistent mode
+    assert agent.runner._workspace_provider is not None
+    assert agent.runner._workspace_root is None
+    # The callable always returns the same dir
+    p1 = agent.runner._workspace_provider(None, "run-1")
+    p2 = agent.runner._workspace_provider(None, "run-2")
+    assert p1 == p2 == tmp_path / "ws"
+    # Workspace dir was created eagerly at build time
+    assert (tmp_path / "ws").exists()
+
+
+def test_workspace_default_is_under_home(monkeypatch) -> None:
+    """Without AGENT_TUI_WORKSPACE override, defaults to ~/.agent-tui-workspace."""
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "sk-fake")
+    monkeypatch.delenv("AGENT_TUI_WORKSPACE", raising=False)
+    agent = build_agent(model=_StubProvider())
+    p = agent.runner._workspace_provider(None, "any")
+    from pathlib import Path
+    assert p == Path.home() / ".agent-tui-workspace"
+
+
+def test_workspace_env_override_expands_user(monkeypatch, tmp_path) -> None:
+    """AGENT_TUI_WORKSPACE supports ~ expansion and relative paths."""
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "sk-fake")
+    target = tmp_path / "custom-ws"
+    monkeypatch.setenv("AGENT_TUI_WORKSPACE", str(target))
+    agent = build_agent(model=_StubProvider())
+    assert agent.runner._workspace_provider(None, "x") == target
 
 
 def test_qwen_missing_key_raises_friendly() -> None:
