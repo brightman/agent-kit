@@ -53,6 +53,12 @@ def test_single_round_final_text() -> None:
         "final_text", "round_end",
     ]
     assert result.final_text == "hello world"
+    # Pin llm_request payload shape so the keys can't silently drift
+    # (this was a doc/code mismatch caught in TUI smoke testing).
+    req_evt = next(e for e in result.events if e.kind == "llm_request")
+    assert set(req_evt.payload) == {"message_count", "tool_count"}
+    assert req_evt.payload["message_count"] == 1   # one user message
+    assert req_evt.payload["tool_count"] == 0      # no tools attached
 
 
 def test_tool_call_then_final_text() -> None:

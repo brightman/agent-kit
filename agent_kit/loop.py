@@ -290,8 +290,8 @@ class AgentLoop:
             yield self._mk_event(
                 round_start_id, "llm_request",
                 {
-                    "messages_count": len(messages),
-                    "tools_count": len(tools_this_round) if tools_this_round else 0,
+                    "message_count": len(messages),
+                    "tool_count": len(tools_this_round) if tools_this_round else 0,
                 },
             )
 

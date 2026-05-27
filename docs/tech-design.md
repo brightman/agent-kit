@@ -966,7 +966,7 @@ if request.stream:
     tool_calls_buf = []
     last_finish = None
     last_usage = None
-    yield Event(kind="llm_request", payload={"messages_count": ..., "tools_count": ...})
+    yield Event(kind="llm_request", payload={"message_count": ..., "tool_count": ...})
     async for delta in provider.chat_stream(messages, tools_this_round, ...):
         yield Event(kind="llm_delta", payload={
             "text_delta": delta.text_delta,
