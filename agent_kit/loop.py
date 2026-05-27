@@ -101,6 +101,17 @@ class RunRequest:
     max_tokens: int | None = None
     # ↑ provider-side max_tokens cap(spec § 3.7.3,2026-05-25 加,gap #3 修复)。
     #   None(默认)= provider 用自己 default。loop 每次 provider.chat 透传。
+    steering_drain: Callable[[], list[str]] | None = None
+    # ↑ Mid-run steering. Loop calls this at the TOP of every round; each
+    #   returned string is appended as `Message(role="user", content=text)`
+    #   to the context and emits a `user_message_added` event. Lets a UI
+    #   ("Agent.send_steering(...)") interrupt / redirect a running agent
+    #   without waiting for it to finish. None(default) = no drain.
+    parallel_tools: bool = True
+    # ↑ When the LLM returns multiple tool_calls in one response, dispatch
+    #   them concurrently via asyncio.gather (default). Set False to fall
+    #   back to sequential. tool_call ↔ tool_result message ordering is
+    #   preserved either way; only wall-clock changes.
 
     def __post_init__(self) -> None:
         if not self.prior_messages:
@@ -241,6 +252,26 @@ class AgentLoop:
                 round_start_id, None, "round_start", {"round": round_idx},
             )
 
+            # --- drain steering queue (mid-run user message injection) ---
+            if request.steering_drain is not None:
+                try:
+                    pending = list(request.steering_drain())
+                except Exception as exc:  # noqa: BLE001 — same swallow policy as cancel_check
+                    import logging
+                    logging.getLogger(__name__).warning(
+                        "RunRequest.steering_drain raised; ignoring (run continues)",
+                        exc_info=True,
+                    )
+                    pending = []
+                for text in pending:
+                    if not text:
+                        continue
+                    messages.append(Message(role="user", content=text))
+                    yield self._mk_event(
+                        round_start_id, "user_message_added",
+                        {"round": round_idx, "text": text, "source": "steering"},
+                    )
+
             # 最后一轮屏蔽 tools(spec § 8.3)
             is_last_round = round_idx == max_rounds - 1
             tools_this_round: list[ToolSchema] | None = None if is_last_round else (all_schemas or None)
@@ -318,64 +349,57 @@ class AgentLoop:
                 )
             )
 
-            for call in response.tool_calls:
-                # 同 round 顶部:两路 cancel,ctx.cancel 优先 reason。
-                if ctx.cancel.is_set():
-                    yield self._mk_event(
-                        round_start_id, "cancelled",
-                        {"round": round_idx, "reason": "external_mid_tool"},
-                    )
-                    return
-                if _check_request_cancel(request.cancel_check):
-                    yield self._mk_event(
-                        round_start_id, "cancelled",
-                        {"round": round_idx, "reason": "cancel_check_mid_tool"},
-                    )
-                    return
-
-                tool_call_id = _new_event_id()
-                yield self._mk_event_with_id(
-                    tool_call_id, round_start_id, "tool_call", call.to_dict(),
-                )
-
-                # --- before_tool hooks ---
-                try:
-                    sc_result, sc_hook = await self._run_before_tool(ctx, call)
-                except Exception as exc:
-                    yield self._mk_error("hook", exc, round_start_id,
-                                          extra={"method": "before_tool",
-                                                 "hook_class": exc.__class__.__name__,
-                                                 "call_id": call.id})
-                    return
-
-                if sc_result is not None:
-                    result = sc_result
-                    yield self._mk_event(
-                        tool_call_id, "tool_short_circuited",
-                        {"by_hook": sc_hook, "call": call.to_dict(),
-                         "result": result.to_dict()},
-                    )
-                else:
-                    result = await router.execute(call, ctx)
-
-                # --- after_tool hooks ---
-                try:
-                    rewritten_result, _ = await self._run_after_tool(ctx, call, result)
-                except Exception as exc:
-                    yield self._mk_error("hook", exc, round_start_id,
-                                          extra={"method": "after_tool",
-                                                 "hook_class": exc.__class__.__name__,
-                                                 "call_id": call.id})
-                    return
-                if rewritten_result is not None:
-                    result = rewritten_result
-
+            # Pre-batch cancel check (mirrors original sequential semantic)
+            if ctx.cancel.is_set():
                 yield self._mk_event(
-                    tool_call_id, "tool_result", result.to_dict(),
+                    round_start_id, "cancelled",
+                    {"round": round_idx, "reason": "external_mid_tool"},
                 )
-                messages.append(
-                    Message(role="tool", content=result.content, tool_call_id=call.id)
+                return
+            if _check_request_cancel(request.cancel_check):
+                yield self._mk_event(
+                    round_start_id, "cancelled",
+                    {"round": round_idx, "reason": "cancel_check_mid_tool"},
                 )
+                return
+
+            # --- tool dispatch (parallel or sequential) ---
+            tool_calls = list(response.tool_calls)
+            use_parallel = request.parallel_tools and len(tool_calls) > 1
+            if use_parallel:
+                # Live-stream events from N concurrent tool tasks via a queue.
+                # Helper writes final tool messages into `messages` in
+                # original call order. Returns on first error event.
+                aborted = False
+                async for evt in self._dispatch_tools_parallel(
+                    tool_calls, ctx, router, round_start_id, messages,
+                ):
+                    yield evt
+                    if evt.kind == "error":
+                        aborted = True
+                if aborted:
+                    return
+            else:
+                # Sequential path (single tool OR parallel_tools=False).
+                for call in tool_calls:
+                    aborted = False
+                    result_content: str | None = None
+                    async for evt in self._dispatch_one_tool(
+                        call, ctx, router, round_start_id,
+                    ):
+                        yield evt
+                        if evt.kind == "error":
+                            aborted = True
+                        elif evt.kind == "tool_result":
+                            result_content = evt.payload["content"]
+                    if aborted:
+                        return
+                    if result_content is not None:
+                        messages.append(Message(
+                            role="tool",
+                            content=result_content,
+                            tool_call_id=call.id,
+                        ))
 
             yield self._mk_event(
                 round_start_id, "round_end", {"round": round_idx},
@@ -395,6 +419,128 @@ class AgentLoop:
                 "traceback": "",
             },
         )
+
+    # ---- tool dispatch helpers ----
+
+    async def _dispatch_one_tool(
+        self,
+        call: ToolCall,
+        ctx: ToolCallContext,
+        router: ToolsetRouter,
+        round_start_id: str,
+    ) -> AsyncIterator[Event]:
+        """Run one tool call end-to-end. Yields all events for this call:
+        tool_call → (tool_short_circuited | execute) → tool_result. On hook
+        failure yields a single error event and stops.
+
+        The caller decides what to do with the trailing event(s) — append a
+        tool message on `tool_result`, abort on `error`. This helper does NOT
+        mutate the conversation messages list itself.
+        """
+        tool_call_id = _new_event_id()
+        yield self._mk_event_with_id(
+            tool_call_id, round_start_id, "tool_call", call.to_dict(),
+        )
+
+        # before_tool hook
+        try:
+            sc_result, sc_hook = await self._run_before_tool(ctx, call)
+        except Exception as exc:  # noqa: BLE001
+            yield self._mk_error(
+                "hook", exc, round_start_id,
+                extra={"method": "before_tool",
+                       "hook_class": exc.__class__.__name__,
+                       "call_id": call.id},
+            )
+            return
+
+        if sc_result is not None:
+            result = sc_result
+            yield self._mk_event(
+                tool_call_id, "tool_short_circuited",
+                {"by_hook": sc_hook, "call": call.to_dict(),
+                 "result": result.to_dict()},
+            )
+        else:
+            result = await router.execute(call, ctx)
+
+        # after_tool hook
+        try:
+            rewritten_result, _ = await self._run_after_tool(ctx, call, result)
+        except Exception as exc:  # noqa: BLE001
+            yield self._mk_error(
+                "hook", exc, round_start_id,
+                extra={"method": "after_tool",
+                       "hook_class": exc.__class__.__name__,
+                       "call_id": call.id},
+            )
+            return
+        if rewritten_result is not None:
+            result = rewritten_result
+
+        yield self._mk_event(tool_call_id, "tool_result", result.to_dict())
+
+    async def _dispatch_tools_parallel(
+        self,
+        tool_calls: list[ToolCall],
+        ctx: ToolCallContext,
+        router: ToolsetRouter,
+        round_start_id: str,
+        messages: list[Message],
+    ) -> AsyncIterator[Event]:
+        """Concurrently run N `_dispatch_one_tool` coros, yielding events
+        live as each child task emits them. After all tasks finish (or any
+        aborts via error event), append tool-result messages to `messages`
+        in **original tool_calls order** to keep the LLM conversation tidy.
+        """
+        import asyncio as _asyncio
+
+        # Sentinel for "this child finished" so the producer can detect
+        # global completion without polling.
+        _DONE = object()
+        event_queue: _asyncio.Queue[Event | object] = _asyncio.Queue()
+        # Per-call slot: final tool content (None if aborted via error)
+        results: list[str | None] = [None] * len(tool_calls)
+        aborted_flags: list[bool] = [False] * len(tool_calls)
+
+        async def run_one(i: int, call: ToolCall) -> None:
+            async for evt in self._dispatch_one_tool(call, ctx, router, round_start_id):
+                await event_queue.put(evt)
+                if evt.kind == "error":
+                    aborted_flags[i] = True
+                elif evt.kind == "tool_result":
+                    results[i] = evt.payload["content"]
+            await event_queue.put(_DONE)
+
+        # Fan-out
+        tasks = [_asyncio.create_task(run_one(i, c)) for i, c in enumerate(tool_calls)]
+        done_count = 0
+        try:
+            while done_count < len(tasks):
+                item = await event_queue.get()
+                if item is _DONE:
+                    done_count += 1
+                    continue
+                yield item  # type: ignore[misc]
+        finally:
+            # Make sure no orphaned tasks linger; gather to surface any
+            # genuine crash from a child coro (shouldn't happen — children
+            # turn errors into events — but be safe).
+            await _asyncio.gather(*tasks, return_exceptions=True)
+
+        if any(aborted_flags):
+            return  # caller already saw the error event(s) and will abort
+
+        # Append tool messages in the LLM's original tool_calls order so the
+        # conversation transcript is deterministic regardless of completion order.
+        for i, call in enumerate(tool_calls):
+            if results[i] is None:
+                continue
+            messages.append(Message(
+                role="tool",
+                content=results[i],
+                tool_call_id=call.id,
+            ))
 
     # ---- helpers ----
 

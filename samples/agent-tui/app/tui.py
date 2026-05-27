@@ -95,8 +95,6 @@ class AgentTui(App[None]):
 
     @on(Input.Submitted, "#input")
     async def on_submit(self, event: Input.Submitted) -> None:
-        if self._busy:
-            return  # ignore double-submit while a run is in flight
         prompt = event.value.strip()
         if not prompt:
             return
@@ -104,8 +102,18 @@ class AgentTui(App[None]):
         inp.value = ""
 
         chat = self.query_one("#chat", RichLog)
-        chat.write(f"\n[bold cyan]You[/]  {prompt}")
+        if self._busy:
+            # Agent is mid-loop — queue this message via Agent.send_steering.
+            # The loop drains it at the top of the next round and the LLM sees
+            # it appended to context. UI shows the queue state immediately.
+            self.agent.send_steering(prompt)
+            chat.write(
+                f"\n[bold cyan]You[/]  [italic dim](queued, will be injected "
+                f"next round — agent is mid-loop)[/]  {prompt}"
+            )
+            return
 
+        chat.write(f"\n[bold cyan]You[/]  {prompt}")
         self._busy = True
         inp.disabled = True
         self.run_worker(self._run_agent(prompt), exclusive=True)
@@ -117,11 +125,17 @@ class AgentTui(App[None]):
 
         events.write(f"[dim]── {_now()}  user_prompt[/] {prompt[:60]}")
 
-        req = RunRequest(
-            agent_id="research-assistant",
-            user_message=prompt,
-            prior_messages=list(self.history),
+        # Build the request via Agent — that wires the steering_drain callable
+        # so send_steering() above flows through.
+        req = self.agent._build_request(
+            prompt,
+            enabled_skills=[],
             max_rounds=12,
+            temperature=None,
+            max_tokens=None,
+            prior_messages=list(self.history),
+            cancel_check=None,
+            metadata=None,
         )
         final_text: str | None = None
         try:
@@ -176,6 +190,7 @@ _COLOR = {
     "tool_result":          "magenta",
     "tool_short_circuited": "yellow",
     "context_compacted":    "yellow",
+    "user_message_added":   "bold cyan",
     "final_text":           "bold green",
     "cancelled":            "yellow",
     "error":                "bold red",
@@ -215,6 +230,9 @@ def _summary(kind: str, p: dict[str, Any]) -> str:
     if kind == "context_compacted":
         return (f"{p.get('strategy','?')}  "
                 f"{p.get('before_tokens','?')}→{p.get('after_tokens','?')} tok")
+    if kind == "user_message_added":
+        text = (p.get("text") or "").replace("\n", "↵ ")
+        return f"[{p.get('source','?')} → round {p.get('round','?')}]  {text[:80]}"
     if kind == "final_text":
         text = (p.get("text") or "").replace("\n", "↵ ")
         return text[:100]

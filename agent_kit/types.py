@@ -29,6 +29,7 @@ EventKind = Literal[
     "error",
     "cancelled",
     "context_compacted",        # 上下文 compact 触发后 emit;payload 见 tech-design § 3.5
+    "user_message_added",       # mid-run steering message injected via RunRequest.steering_drain
 ]
 
 

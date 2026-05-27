@@ -1535,6 +1535,25 @@ Stage 重做;baizhi-agent / fam-runtime 在 Stage 5/6 之前完全不受影响�
 | **Sandbox diet 抽象** | `contrib/sandbox/`(见 § 16.3,Stage B-F) | core 不动一行,可选 import |
 | **Script executor / Skill scripts toolset** | 上层 OR `SandboxToolset`(§ 16.3) | 已有 diet 实现兜底 |
 
+> **Borrowed from pi-main(2026-05-27)** —— after surveying the pi agent
+> harness mono-repo (~96k LoC TypeScript) we adopted two cheap wins:
+>
+> - **Steering queue**:`Agent.send_steering(text)` enqueues a user message
+>   that the loop drains at the TOP of the next round via
+>   `RunRequest.steering_drain: Callable`. Emits a `user_message_added`
+>   event. Lets a UI ("agent is thinking" with active typing) inject
+>   redirections without waiting for `final_text`. ~80 LoC + 9 tests.
+> - **Parallel tool dispatch**:when an LLM turn returns N>1 tool_calls,
+>   they run concurrently via `asyncio.gather`. `RunRequest.parallel_tools
+>   = True` (default; set False for strict serial). Message ordering in
+>   the transcript preserves the LLM's original tool_calls order
+>   regardless of completion order — replay-safe. ~120 LoC + 8 tests.
+>
+> Explicitly NOT borrowed:Session persistence(spec § 1 Non-goals);
+> LLM-summary compaction(spec § 15);per-provider native SDK shim
+> (LiteLLM covers it);self-rolled TUI(Textual works);declarative
+> Manifest / Capability for sandbox(spec § 16).
+
 ---
 
 ## 16. Sandbox 与 script 执行(Diet 抽象 + contrib 三家参考实现)

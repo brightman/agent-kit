@@ -748,6 +748,100 @@ if not is_acceptable(first.final_text):
 
 ---
 
+## 10.5 Steering: inject a message mid-run
+
+For interactive UIs (TUIs, web chat) the user sometimes wants to **redirect
+the agent while it's mid-loop** — without waiting for `final_text`. The
+`Agent.send_steering(text)` queue handles this:
+
+```python
+agent = Agent(name="x", model="...")
+
+# In background:
+run_task = asyncio.create_task(agent.run("research X and write a report"))
+
+# While the agent is mid-loop:
+agent.send_steering("Actually, focus on Python 3.13 specifically.")
+
+# Loop picks it up at the TOP of the next round and emits a
+# `user_message_added` event. The agent's next LLM call sees the new user
+# message appended to context.
+
+result = await run_task
+```
+
+Semantics:
+- Messages are drained **at every `round_start`** (FIFO, all-at-once)
+- If you call `send_steering` after a run has finished, the message sits
+  in the queue for the next run
+- If you call it before any run starts, same thing — first run picks it up
+- The drain hook is wired by `Agent` automatically; if you build
+  `Runner` / `RunRequest` directly, pass your own
+  `RunRequest(steering_drain=callable)` (where `callable: () -> list[str]`)
+- A buggy `steering_drain` callable that raises is **swallowed + logged**,
+  same policy as `cancel_check`
+
+TUI pattern (the one in `samples/agent-tui/`):
+
+```python
+async def on_user_submit(text: str):
+    if self.agent.runner.is_busy:   # if such a flag exists in your code
+        self.agent.send_steering(text)
+        chat.write(f"[queued] {text}")
+    else:
+        result = await self.agent.run(text, prior_messages=history)
+```
+
+---
+
+## 10.6 Parallel tool execution
+
+When the LLM returns **multiple tool_calls in one response** (very common
+for `read_file` batches, parallel searches, multi-file inspections), they
+run **concurrently by default**:
+
+```python
+agent = Agent(name="x", model="...", tools=[...])
+# In each turn, if the LLM picks 3 tools, all 3 dispatch in parallel.
+```
+
+Wall-clock benefit: 3 tools × 100ms each go from ~300ms (sequential) to
+~100ms (parallel + a few ms of overhead). Real win when the tools block
+on network (MCP, sandbox subprocess, etc).
+
+Knobs:
+
+```python
+# Force strict sequential (for debugging, or if a toolset has shared state)
+result = agent.run_sync(prompt, ...)   # No direct knob via Agent yet;
+                                       # construct RunRequest yourself
+                                       # OR use agent.runner.run(...) with:
+from agent_kit import RunRequest
+await agent.runner.run_to_completion(
+    RunRequest(agent_id="x", user_message=prompt, parallel_tools=False)
+)
+```
+
+Guarantees preserved under parallel:
+- **Transcript order**: tool messages are appended to context in the LLM's
+  original `tool_calls` order, regardless of who finishes first. The
+  next LLM call sees a deterministic conversation.
+- **Event tree**: `tool_call` / `tool_result` events may interleave in
+  the stream, but each pair links via `parent_event_id`. Your trace UI
+  reconstructs them correctly.
+- **Hook errors**: if any tool's `before_tool` / `after_tool` raises,
+  the run aborts with a single `error` event (same behavior as
+  sequential). The other tool tasks complete but their results are
+  discarded.
+
+When NOT to use parallel:
+- Toolset with shared mutable state that isn't async-safe — make
+  internal serialization the toolset's responsibility, OR set
+  `parallel_tools=False`
+- Each tool is so cheap (sub-ms) that gather overhead dominates
+
+---
+
 ## 11. Cancel
 
 Two ways to cancel a run:

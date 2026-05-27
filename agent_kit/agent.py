@@ -132,6 +132,11 @@ class Agent:
             hooks=self.hooks,
             workspace=self.workspace,
         )
+        # Steering queue: messages added mid-run via `send_steering()`.
+        # Drained at each round_start by RunRequest.steering_drain (wired in
+        # _build_request). Empty between runs — caller's responsibility to
+        # send follow-ups after a run completes.
+        self._steering_queue: list[str] = []
 
     # ---- public ----
 
@@ -252,7 +257,41 @@ class Agent:
             prior_messages=list(prior_messages) if prior_messages else [],
             cancel_check=cancel_check,
             metadata=dict(metadata) if metadata else {},
+            steering_drain=self._drain_steering,
         )
+
+    # ---- steering queue (mid-run user-message injection) ----
+
+    def send_steering(self, text: str) -> None:
+        """Enqueue a user message to be injected at the TOP of the next
+        round of the currently running loop.
+
+        Safe to call from any task (this side just appends to a list; the
+        loop drains in its own coro context). If no `.run()` is in flight,
+        the message sits in the queue until one starts. Caller responsible
+        for clearing the queue if needed.
+
+        Typical use: TUI keyboard handler — user submits a follow-up while
+        the agent is mid-loop; instead of waiting for `final_text`, push
+        the new prompt so the agent picks it up next round.
+        """
+        if not isinstance(text, str) or not text:
+            return
+        self._steering_queue.append(text)
+
+    def pending_steering(self) -> int:
+        """How many steering messages are currently queued (haven't been
+        drained yet). Mostly for diagnostics / tests."""
+        return len(self._steering_queue)
+
+    def _drain_steering(self) -> list[str]:
+        """Atomically pop everything in the queue. Called by the loop at
+        each `round_start`. Pure FIFO — no mode flag (we always drain all)."""
+        if not self._steering_queue:
+            return []
+        out = self._steering_queue
+        self._steering_queue = []
+        return out
 
     @staticmethod
     def _resolve_skills_source(
